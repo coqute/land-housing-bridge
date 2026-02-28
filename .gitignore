@@ -1,0 +1,27 @@
+# Secrets & local config
+.env
+.env.*
+.mcp.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Logs & test artifacts
+*.log
+batch_output*.txt
+ih_check*.json
+ih_fetch_test.json
+
+# Generated at runtime by setup_scheduler.py
+batch/run.bat
+
+# Claude Code
+.claude/
+
+# IDE
+.idea/
