@@ -74,10 +74,14 @@ async def fetch_all_ih_notices(
     endCrtrYmd: str = "",
     sj: str = "",
     seNm: str = "",
+    tyNm: str = "",
 ) -> list[dict]:
     """IH 공고를 전체 페이지 순회하여 모두 조회합니다 (배치용).
 
     API numOfRows 최대값이 30이므로 페이지네이션으로 전체 수집합니다.
+
+    Args:
+        tyNm: 유형명 클라이언트 사이드 필터 (예: '일반임대'). API 미지원 → 조회 후 필터링.
     """
     all_items: list[dict] = []
     page = 1
@@ -97,5 +101,8 @@ async def fetch_all_ih_notices(
         if page >= total_pages or not items:
             break
         page += 1
+
+    if tyNm:
+        all_items = [item for item in all_items if item.get("tyNm") == tyNm]
 
     return all_items

@@ -68,6 +68,8 @@ async def run_ih_batch():
         notices = await fetch_all_ih_notices(
             startCrtrYmd=start_date,
             endCrtrYmd=end_date,
+            seNm="임대",
+            tyNm="일반임대",
         )
     except Exception as e:
         logger.error(f"IH API 조회 실패: {e}")

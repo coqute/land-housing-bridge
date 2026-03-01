@@ -34,7 +34,7 @@ def create_run_bat():
     content = textwrap.dedent(f"""\
         @echo off
         cd /d "{PROJECT_ROOT}"
-        "{PYTHON_EXE}" -m batch.main >> "{LOG_FILE}" 2>&1
+        "{PYTHON_EXE}" -m batch.main
     """)
     with open(RUN_BAT, "w", encoding="utf-8") as f:
         f.write(content)
