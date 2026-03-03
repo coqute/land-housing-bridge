@@ -25,14 +25,14 @@ Claude AI에게 공고 조회 도구를 제공합니다.
 ## 디렉토리 구조
 
 ```
+config.py               # 환경변수 일원화 (.env 로딩 + 공유 상수)
 lh_api.py               # LH API 공통 로직 (server/, batch/ 공유)
 ih_api.py               # IH API 공통 로직 (server/, batch/ 공유)
 server/
 └── lh_mcp.py           # FastMCP 서버 — AI 도구 노출
 batch/
 ├── main.py             # 배치 진입점 — LH + IH 순차 실행
-├── lh_fetcher.py       # lh_api.py 재사용 래퍼
-├── ih_fetcher.py       # ih_api.py 재사용 래퍼
+├── notion_base.py      # Notion 공통 로직 (Client, 헬퍼, 페이지네이션, DB 생성)
 ├── notion_writer.py    # LH Notion DB upsert
 ├── ih_notion_writer.py # IH Notion DB upsert
 ├── setup_scheduler.py  # Windows Task Scheduler 등록
