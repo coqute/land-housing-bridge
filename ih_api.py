@@ -1,12 +1,7 @@
 """공통 IH(인천도시공사) API 로직 — server/lh_mcp.py 와 batch/ 에서 사용합니다."""
-import os
 import logging
 import httpx
-from dotenv import load_dotenv
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
-
-API_KEY = os.getenv("OPEN_API_KEY")
+from config import OPEN_API_KEY as API_KEY
 
 NOTICE_URL = "https://apis.data.go.kr/B552831/ih/slls-posts"
 
@@ -20,6 +15,7 @@ async def fetch_ih_notices(
     endCrtrYmd: str = "",
     sj: str = "",
     seNm: str = "",
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict]:
     """IH 분양임대 공고문을 조회합니다.
 
@@ -30,6 +26,7 @@ async def fetch_ih_notices(
         endCrtrYmd: 조회 종료일 (YYYY-MM-DD, 필수)
         sj: 공고 제목 필터 키워드
         seNm: 공고 구분 (분양/임대, 빈 문자열이면 전체)
+        client: 외부 httpx.AsyncClient (None이면 내부 생성)
 
     Returns:
         list of dict: 각 공고의 tyNm, seNm, crtYmd, sj, link 등
@@ -53,10 +50,16 @@ async def fetch_ih_notices(
     if seNm:
         params["seNm"] = seNm
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(NOTICE_URL, params=params)
+    async def _do_request(c: httpx.AsyncClient):
+        resp = await c.get(NOTICE_URL, params=params)
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
+
+    if client:
+        data = await _do_request(client)
+    else:
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            data = await _do_request(c)
 
     # Swagger 명세 응답 구조:
     # { header: {resultCode, resultMsg}, body: {pageNo, numOfRows, totalPageNo, totalCount, posts: [...]} }
@@ -86,21 +89,23 @@ async def fetch_all_ih_notices(
     all_items: list[dict] = []
     page = 1
 
-    while True:
-        items, total_pages = await fetch_ih_notices(
-            numOfRows=30,
-            pageNo=page,
-            startCrtrYmd=startCrtrYmd,
-            endCrtrYmd=endCrtrYmd,
-            sj=sj,
-            seNm=seNm,
-        )
-        all_items.extend(items)
-        logger.info(f"IH API 페이지 {page}/{total_pages} 조회: {len(items)}건")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            items, total_pages = await fetch_ih_notices(
+                numOfRows=30,
+                pageNo=page,
+                startCrtrYmd=startCrtrYmd,
+                endCrtrYmd=endCrtrYmd,
+                sj=sj,
+                seNm=seNm,
+                client=client,
+            )
+            all_items.extend(items)
+            logger.info(f"IH API 페이지 {page}/{total_pages} 조회: {len(items)}건")
 
-        if page >= total_pages or not items:
-            break
-        page += 1
+            if page >= total_pages or not items:
+                break
+            page += 1
 
     if tyNm:
         all_items = [item for item in all_items if item.get("tyNm") == tyNm]

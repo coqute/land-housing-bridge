@@ -1,14 +1,9 @@
-"""공통 LH API 로직 — server/lh_mcp.py 와 batch/lh_fetcher.py 양쪽에서 공유합니다."""
-import os
+"""공통 LH API 로직 — server/lh_mcp.py 와 batch/ 양쪽에서 공유합니다."""
 import asyncio
 import logging
 import httpx
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
-
-API_KEY = os.getenv("OPEN_API_KEY")
+from config import OPEN_API_KEY as API_KEY
 
 NOTICE_URL = "http://apis.data.go.kr/B552555/lhLeaseNoticeInfo1/lhLeaseNoticeInfo1"
 SUPPLY_URL = "http://apis.data.go.kr/B552555/lhLeaseNoticeSplInfo1/getLeaseNoticeSplInfo1"

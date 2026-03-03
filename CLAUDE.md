@@ -24,16 +24,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 .mcp.json               # Claude Code MCP 설정 (gitignore됨, API 키 포함)
 .env                    # 환경변수 (gitignore됨)
+config.py               # 환경변수 일원화 (.env 로딩 + 공유 상수)
 lh_api.py               # 공통 LH API 로직 (server/와 batch/ 공유)
 ih_api.py               # IH(인천도시공사) API 로직 (server/와 batch/ 공유)
 server/
 └── lh_mcp.py           # FastMCP 서버 — LH·IH AI 도구 노출용
 batch/
-├── main.py             # 배치 진입점 — LH + IH 순차 실행
-├── lh_fetcher.py       # lh_api.py 재사용 래퍼
-├── ih_fetcher.py       # ih_api.py 재사용 래퍼
-├── notion_writer.py    # LH Notion DB upsert (PAN_ID 기준)
-├── ih_notion_writer.py # IH Notion DB upsert (link 기준)
+├── main.py             # 배치 진입점 — LH + IH 순차 실행 (lh_api/ih_api 직접 import)
+├── notion_base.py      # Notion 공통 로직 (Client 지연초기화, 헬퍼, 페이지네이션, DB 생성)
+├── notion_writer.py    # LH Notion DB upsert (PAN_ID 기준, notion_base 사용)
+├── ih_notion_writer.py # IH Notion DB upsert (link 기준, notion_base 사용)
 ├── setup_scheduler.py  # Windows Task Scheduler 등록
 └── requirements.txt    # notion-client, httpx, python-dotenv
 ```
@@ -138,16 +138,19 @@ py -m batch.setup_scheduler
 
 **LH 배치:**
 - `KEYWORD_FILTER = "신혼"` — 공고명 필터 키워드
-- `fetch_lh_notices()` → 신혼 키워드 필터링 → `lh_upsert_all(notices)`
+- `lh_api.fetch_lh_notices()` → 신혼 키워드 필터링 → `lh_upsert_all(notices)`
 - Notion DB: "LH 인천 임대주택 공고" (`NOTION_DATABASE_ID`)
 
 **IH 배치:**
 - 최근 1년 전체 공고 조회 (키워드 필터 없음)
-- `fetch_ih_notices()` → `ih_upsert_all(notices)`
+- `ih_api.fetch_all_ih_notices()` → `ih_upsert_all(notices)`
 - Notion DB: "IH 인천도시공사 분양임대 공고" (`IH_NOTION_DATABASE_ID`)
 - upsert 식별자: `link` (고유 ID 없음)
 
-**공통:** Notion DB는 최초 실행 시 자동 생성, DB ID를 `.env`에 저장
+**공통:**
+- `notion_base.py` — Notion 클라이언트 지연 초기화, `rich_text`/`select`/`query_db`/`paginate_query`/`get_or_create_database` 공통 함수 제공
+- `config.py` — `.env` 로딩 1회, `OPEN_API_KEY`/`NOTION_TOKEN`/`NOTION_PARENT_PAGE_ID` 일원화
+- Notion DB는 최초 실행 시 자동 생성, DB ID를 `.env`에 저장
 
 ## Environment Variables (`.env`)
 

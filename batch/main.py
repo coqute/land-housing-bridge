@@ -3,9 +3,9 @@ import logging
 import os
 import sys
 
-from .lh_fetcher import fetch_lh_notices
+from lh_api import fetch_lh_notices
 from .notion_writer import upsert_all as lh_upsert_all
-from .ih_fetcher import fetch_all_ih_notices
+from ih_api import fetch_all_ih_notices
 from .ih_notion_writer import upsert_all as ih_upsert_all
 
 # ---------------------------------------------------------------------------
