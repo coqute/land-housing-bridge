@@ -4,6 +4,7 @@ import logging
 import httpx
 from datetime import datetime, timedelta
 from config import OPEN_API_KEY as API_KEY
+from http_utils import request_with_retry
 
 NOTICE_URL = "http://apis.data.go.kr/B552555/lhLeaseNoticeInfo1/lhLeaseNoticeInfo1"
 SUPPLY_URL = "http://apis.data.go.kr/B552555/lhLeaseNoticeSplInfo1/getLeaseNoticeSplInfo1"
@@ -49,14 +50,13 @@ async def _fetch_supply(client: httpx.AsyncClient, item: dict, tp_code: str) -> 
 
     try:
         async with _SUPPLY_SEMAPHORE:
-            supply_resp = await client.get(SUPPLY_URL, params={
+            supply_resp = await request_with_retry(client, "GET", SUPPLY_URL, params={
                 "ServiceKey": API_KEY,
                 "SPL_INF_TP_CD": spl_tp,
                 "CCR_CNNT_SYS_DS_CD": ccr_cd,
                 "PAN_ID": pan_id,
                 "UPP_AIS_TP_CD": tp_code,
             })
-            supply_resp.raise_for_status()
         supply_data = supply_resp.json()
         cols = _extract_ds_list(supply_data, 'dsList01Nm')
         supply_columns = cols[0] if cols else {}
@@ -112,8 +112,7 @@ async def fetch_lh_notices(
         notice_params["PAN_ED_DT"] = today.strftime('%Y.%m.%d')
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        notice_resp = await client.get(NOTICE_URL, params=notice_params)
-        notice_resp.raise_for_status()
+        notice_resp = await request_with_retry(client, "GET", NOTICE_URL, params=notice_params)
         notice_data = notice_resp.json()
 
         raw_list = _extract_ds_list(notice_data)
@@ -140,8 +139,31 @@ async def fetch_lh_notices(
                 "PAN_NT_ST_DT": item.get('PAN_NT_ST_DT', ''),   # 공고 시작일 (응답 필드명)
                 "CLSG_DT": item.get('CLSG_DT', ''),             # 공고 마감일 (응답 필드명)
                 "DTL_URL": item.get('DTL_URL', ''),
+                "SPL_INF_TP_CD": item.get('SPL_INF_TP_CD', ''),
+                "CCR_CNNT_SYS_DS_CD": item.get('CCR_CNNT_SYS_DS_CD', ''),
                 "supply_columns": supply_columns,
                 "supply_details": supply_details,
             })
 
         return results
+
+
+async def fetch_supply_detail(
+    pan_id: str,
+    spl_inf_tp_cd: str,
+    ccr_cnnt_sys_ds_cd: str,
+    tp_code: str = "13",
+) -> dict:
+    """특정 LH 공고의 공급정보 상세를 조회합니다 (MCP 도구용).
+
+    Returns:
+        dict: {"supply_columns": dict, "supply_details": list}
+    """
+    item = {
+        "PAN_ID": pan_id,
+        "SPL_INF_TP_CD": spl_inf_tp_cd,
+        "CCR_CNNT_SYS_DS_CD": ccr_cnnt_sys_ds_cd,
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        columns, details = await _fetch_supply(client, item, tp_code)
+    return {"supply_columns": columns, "supply_details": details}

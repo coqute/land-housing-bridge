@@ -158,6 +158,7 @@ def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None =
         notion.pages.update(page_id=existing_page_id, properties=properties)
         _replace_page_blocks(existing_page_id, supply_blocks)
         logger.info(f"  [업데이트] {notice['PAN_NM']} (PAN_ID={pan_id})")
+        return False
     else:
         notion.pages.create(
             parent={"type": "database_id", "database_id": db_id},
@@ -165,6 +166,7 @@ def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None =
             children=supply_blocks,
         )
         logger.info(f"  [신규등록] {notice['PAN_NM']} (PAN_ID={pan_id})")
+        return True
 
 
 def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dict[str, dict] | None = None):
@@ -190,8 +192,9 @@ def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dic
                if pan_id not in current_pan_ids}
 
     if not expired:
-        return
+        return 0
 
+    closed = 0
     logger.info(f"마감 처리 대상: {len(expired)}건")
     for pan_id, page_id in expired.items():
         try:
@@ -200,12 +203,18 @@ def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dic
                 properties={"공고상태": select("공고마감")},
             )
             logger.info(f"  [공고마감] PAN_ID={pan_id}")
+            closed += 1
         except Exception as e:
             logger.error(f"  [오류] 마감 처리 실패 (PAN_ID={pan_id}): {e}")
+    return closed
 
 
-def upsert_all(notices: list[dict]):
-    """공고 목록 전체를 Notion DB에 upsert하고, 마감된 공고는 상태 업데이트."""
+def upsert_all(notices: list[dict]) -> dict:
+    """공고 목록 전체를 Notion DB에 upsert하고, 마감된 공고는 상태 업데이트.
+
+    Returns:
+        dict: {"new": int, "updated": int, "closed": int, "failed": int, "new_notices": list}
+    """
     db_id = get_or_create_database("NOTION_DATABASE_ID", DB_NAME, DB_PROPERTIES)
     current_pan_ids = {n["PAN_ID"] for n in notices}
 
@@ -213,16 +222,22 @@ def upsert_all(notices: list[dict]):
     page_cache = _get_all_pan_id_page_map(db_id)
     logger.info(f"기존 등록 공고 수: {len(page_cache)}건")
 
-    success, failed = 0, 0
+    new, updated, failed = 0, 0, 0
+    new_notices: list[dict] = []
 
     for notice in notices:
         try:
-            upsert_notice(db_id, notice, page_cache=page_cache)
-            success += 1
+            is_new = upsert_notice(db_id, notice, page_cache=page_cache)
+            if is_new:
+                new += 1
+                new_notices.append(notice)
+            else:
+                updated += 1
         except Exception as e:
             logger.error(f"  [오류] {notice.get('PAN_NM', '?')} (PAN_ID={notice.get('PAN_ID', '?')}): {e}")
             failed += 1
 
-    close_expired_notices(db_id, current_pan_ids, page_cache=page_cache)
+    closed = close_expired_notices(db_id, current_pan_ids, page_cache=page_cache)
 
-    logger.info(f"Notion 저장 완료 - 성공: {success}, 실패: {failed}")
+    logger.info(f"Notion 저장 완료 - 신규: {new}, 업데이트: {updated}, 마감: {closed}, 실패: {failed}")
+    return {"new": new, "updated": updated, "closed": closed, "failed": failed, "new_notices": new_notices}

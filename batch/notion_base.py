@@ -59,7 +59,7 @@ def paginate_query(db_id: str, body_base: dict | None = None) -> list[dict]:
     return all_pages
 
 
-def get_or_create_database(env_key: str, db_name: str, db_properties: dict) -> str:
+def get_or_create_database(env_key: str, db_name: str, db_properties: dict, title_name: str = "공고명") -> str:
     """env_key 환경변수에 DB ID가 있으면 반환, 없으면 신규 생성 후 .env에 저장"""
     db_id = os.getenv(env_key, "").strip().strip("'\"")
     if db_id:
@@ -74,7 +74,7 @@ def get_or_create_database(env_key: str, db_name: str, db_properties: dict) -> s
             "parent": {"type": "page_id", "page_id": NOTION_PARENT_PAGE_ID},
             "title": [{"type": "text", "text": {"content": db_name}}],
             "is_inline": True,
-            "properties": {"공고명": {"title": {}}, **db_properties},
+            "properties": {title_name: {"title": {}}, **db_properties},
         },
     )
     db_id = response["id"]

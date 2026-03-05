@@ -2,6 +2,7 @@
 import logging
 import httpx
 from config import OPEN_API_KEY as API_KEY
+from http_utils import request_with_retry
 
 NOTICE_URL = "https://apis.data.go.kr/B552831/ih/slls-posts"
 
@@ -16,7 +17,7 @@ async def fetch_ih_notices(
     sj: str = "",
     seNm: str = "",
     client: httpx.AsyncClient | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """IH 분양임대 공고문을 조회합니다.
 
     Args:
@@ -29,7 +30,7 @@ async def fetch_ih_notices(
         client: 외부 httpx.AsyncClient (None이면 내부 생성)
 
     Returns:
-        list of dict: 각 공고의 tyNm, seNm, crtYmd, sj, link 등
+        tuple[list[dict], int]: (공고 목록, 전체 페이지 수)
     """
     if not API_KEY:
         raise EnvironmentError("OPEN_API_KEY 환경변수가 설정되지 않았습니다.")
@@ -51,8 +52,7 @@ async def fetch_ih_notices(
         params["seNm"] = seNm
 
     async def _do_request(c: httpx.AsyncClient):
-        resp = await c.get(NOTICE_URL, params=params)
-        resp.raise_for_status()
+        resp = await request_with_retry(c, "GET", NOTICE_URL, params=params)
         return resp.json()
 
     if client:
