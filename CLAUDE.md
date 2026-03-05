@@ -25,15 +25,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .mcp.json               # Claude Code MCP 설정 (gitignore됨, API 키 포함)
 .env                    # 환경변수 (gitignore됨)
 config.py               # 환경변수 일원화 (.env 로딩 + 공유 상수)
+http_utils.py           # HTTP 재시도 유틸리티 (exponential backoff)
 lh_api.py               # 공통 LH API 로직 (server/와 batch/ 공유)
 ih_api.py               # IH(인천도시공사) API 로직 (server/와 batch/ 공유)
 server/
 └── lh_mcp.py           # FastMCP 서버 — LH·IH AI 도구 노출용
 batch/
-├── main.py             # 배치 진입점 — LH + IH 순차 실행 (lh_api/ih_api 직접 import)
+├── main.py             # 배치 진입점 — LH + IH 순차 실행 + 리포트 생성
 ├── notion_base.py      # Notion 공통 로직 (Client 지연초기화, 헬퍼, 페이지네이션, DB 생성)
 ├── notion_writer.py    # LH Notion DB upsert (PAN_ID 기준, notion_base 사용)
 ├── ih_notion_writer.py # IH Notion DB upsert (link 기준, notion_base 사용)
+├── report_writer.py    # 배치 실행 리포트 Notion DB 생성
 ├── setup_scheduler.py  # Windows Task Scheduler 등록
 └── requirements.txt    # notion-client, httpx, python-dotenv
 ```
@@ -56,11 +58,15 @@ py -m batch.setup_scheduler
 ## MCP Server (`server/lh_mcp.py`)
 
 - `FastMCP("LH_Incheon_Notice_Server")` 인스턴스
-- `@mcp.tool()` 데코레이터로 `get_incheon_lh_notices()`, `get_ih_notices()` 도구 노출
-- `lh_api.fetch_lh_notices()`, `ih_api.fetch_ih_notices()` 호출 후 텍스트로 포맷하여 반환
+- 5개 도구 노출:
+  - `get_incheon_lh_notices()` — LH 공고 + 공급정보 조회
+  - `get_ih_notices()` — IH 공고 조회
+  - `get_notice_summary()` — LH+IH 공고 현황 요약 (최근 N일)
+  - `search_all_notices()` — LH+IH 통합 키워드 검색
+  - `get_supply_detail()` — 특정 LH 공고의 공급정보 상세 조회
 - 환경변수 `OPEN_API_KEY` 필요 (`.mcp.json`의 `env` 필드에 설정)
 
-**도구 파라미터 기본값:**
+**`get_incheon_lh_notices` 파라미터:**
 
 | 파라미터 | 기본값 | 설명 |
 |---|---|---|
@@ -71,9 +77,43 @@ py -m batch.setup_scheduler
 | `lookback_days` | `0` | 0이면 날짜 파라미터 없이 현재 활성 공고 포함 조회. 양수이면 과거 마감 공고 조회 (활성 제외됨). |
 | `limit` | `100` | 페이지당 공고 수 (API 최대값 실측 확인, 이 이상 올려도 동일) |
 
+**`get_notice_summary` 파라미터:**
+
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `days` | `30` | 조회 기간 (일) |
+| `tp_code` | `13` | LH 공고유형코드 |
+
+**`search_all_notices` 파라미터:**
+
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `keyword` | (필수) | 검색 키워드 |
+| `days` | `365` | 조회 기간 (일) |
+| `category` | `""` | IH 공고 구분 (분양/임대) |
+
+**`get_supply_detail` 파라미터:**
+
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `pan_id` | (필수) | 공고 ID |
+| `spl_inf_tp_cd` | (필수) | 공급정보유형코드 (공고 목록의 SPL_INF_TP_CD) |
+| `ccr_cnnt_sys_ds_cd` | (필수) | 시스템구분코드 (공고 목록의 CCR_CNNT_SYS_DS_CD) |
+| `tp_code` | `13` | 공고유형코드 |
+
+**MCP 내부 헬퍼:**
+- `_gather_lh_notices(days, **kwargs)` — 활성(lookback_days=0) + 과거(lookback_days=days) 2회 조회 → PAN_ID 중복 제거 병합. LH API 날짜 파라미터 존재 시 활성 공고 제외 문제 해결.
+- `_format_supply_rows()` — 공급정보를 마크다운 bullet 리스트로 변환
+
 **MCP 설정 (`.mcp.json`):**
 - `notion` 서버: `npx @notionhq/notion-mcp-server` (NOTION_TOKEN 필요)
 - `lh` 서버: `.venv/Scripts/python.exe -m server.lh_mcp` + `cwd` 루트 (OPEN_API_KEY 필요)
+
+## HTTP Retry (`http_utils.py`)
+
+- `request_with_retry(client, method, url, **kwargs)` — 모든 API 호출에 적용
+- 재시도 대상: HTTP 429, 500, 502, 503, 504 + `httpx.TimeoutException` + `httpx.ConnectError`
+- 전략: 최대 3회, exponential backoff (2s → 4s → 8s)
 
 ## LH API
 
@@ -108,6 +148,8 @@ py -m batch.setup_scheduler
 
 **공급정보 파라미터:** `SPL_INF_TP_CD`, `CCR_CNNT_SYS_DS_CD`를 공고 목록 item에서 가져와야 함 (빈값 전달 시 데이터 없음)
 
+**공급정보 독립 조회:** `lh_api.fetch_supply_detail(pan_id, spl_inf_tp_cd, ccr_cnnt_sys_ds_cd, tp_code)` — MCP `get_supply_detail` 도구에서 사용
+
 ## IH API (`ih_api.py`)
 
 **엔드포인트:**
@@ -118,7 +160,7 @@ py -m batch.setup_scheduler
 | 파라미터 | 기본값 | 설명 |
 |---|---|---|
 | `serviceKey` | `OPEN_API_KEY` | 공공데이터포털 API 키 |
-| `numOfRows` | `100` | 페이지당 건수 |
+| `numOfRows` | `30` | 페이지당 건수 (API 최대값 30) |
 | `pageNo` | `1` | 페이지 번호 |
 | `startCrtrYmd` | (필수) | 조회 시작일 (`YYYY-MM-DD`) |
 | `endCrtrYmd` | (필수) | 조회 종료일 (`YYYY-MM-DD`) |
@@ -137,18 +179,32 @@ py -m batch.setup_scheduler
 ## Batch (`batch/`)
 
 **LH 배치:**
-- `KEYWORD_FILTER = "신혼"` — 공고명 필터 키워드
-- `lh_api.fetch_lh_notices()` → 신혼 키워드 필터링 → `lh_upsert_all(notices)`
+- `LH_TP_CODES = ["13", "06"]` — 매입/전세임대 + 임대주택(행복주택, 국민임대 등)
+- `asyncio.gather`로 두 유형 병렬 조회 → PAN_ID 기준 중복 제거 병합
+- 키워드 필터 없음 (두 유형 모두 거의 100% 입주자 모집 공고)
+- `upsert_all()` 반환: `{"new", "updated", "closed", "failed", "new_notices"}`
 - Notion DB: "LH 인천 임대주택 공고" (`NOTION_DATABASE_ID`)
 
 **IH 배치:**
-- 최근 1년 전체 공고 조회 (키워드 필터 없음)
+- 최근 90일 입주자 모집 공고 조회
+- server-side `sj="입주자"` + client-side `_is_recruitment_notice()` 필터 (모집+공고 포함, 노이즈 키워드 제외)
+- 노이즈 키워드: 마감, 취소, 결과, 계약, 입주안내, 변경, 정정
 - `ih_api.fetch_all_ih_notices()` → `ih_upsert_all(notices)`
+- `upsert_all()` 반환: `{"new", "updated", "closed", "failed", "new_notices"}` (LH와 동일 구조)
+- `close_expired_notices(active_links, page_cache)` — API 조회 결과에 없는 공고를 "마감" 처리 (차집합 비교)
 - Notion DB: "IH 인천도시공사 분양임대 공고" (`IH_NOTION_DATABASE_ID`)
+- DB 스키마에 "상태" select 속성 포함 (모집중/마감)
 - upsert 식별자: `link` (고유 ID 없음)
+
+**배치 리포트:**
+- `report_writer.py` — 배치 실행 결과를 Notion DB에 자동 기록
+- Notion DB: "배치 실행 리포트" (`REPORT_DATABASE_ID`, 최초 실행 시 자동 생성)
+- 기록 항목: 실행일시, 소요시간, LH 신규·업데이트·마감, IH 신규·업데이트·마감 건수, 상태(성공/부분실패/실패)
+- 신규 공고 목록을 페이지 본문에 bullet list로 포함
 
 **공통:**
 - `notion_base.py` — Notion 클라이언트 지연 초기화, `rich_text`/`select`/`query_db`/`paginate_query`/`get_or_create_database` 공통 함수 제공
+- `get_or_create_database(env_key, db_name, db_properties, title_name="공고명")` — `title_name`으로 title 속성명 지정 가능
 - `config.py` — `.env` 로딩 1회, `OPEN_API_KEY`/`NOTION_TOKEN`/`NOTION_PARENT_PAGE_ID` 일원화
 - Notion DB는 최초 실행 시 자동 생성, DB ID를 `.env`에 저장
 
@@ -160,6 +216,7 @@ NOTION_TOKEN=...          # Notion 통합 토큰
 NOTION_PARENT_PAGE_ID=... # Notion 부모 페이지 ID
 NOTION_DATABASE_ID=...    # LH Notion DB ID (배치 최초 실행 후 자동 저장)
 IH_NOTION_DATABASE_ID=... # IH Notion DB ID (배치 최초 실행 후 자동 저장)
+REPORT_DATABASE_ID=...    # 배치 리포트 Notion DB ID (배치 최초 실행 후 자동 저장)
 ```
 
 ## Work Principles
