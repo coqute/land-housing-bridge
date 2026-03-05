@@ -59,10 +59,32 @@ def paginate_query(db_id: str, body_base: dict | None = None) -> list[dict]:
     return all_pages
 
 
+_checked_dbs: set[str] = set()
+
+
+def _ensure_db_properties(db_id: str, expected_properties: dict):
+    """기존 DB에 누락된 속성이 있으면 추가 (스키마 drift 방지, 프로세스당 1회)"""
+    if db_id in _checked_dbs:
+        return
+    _checked_dbs.add(db_id)
+
+    notion = get_notion_client()
+    db_info = notion.request(path=f"databases/{db_id}", method="GET")
+    existing = set(db_info.get("properties", {}).keys())
+    missing = {k: v for k, v in expected_properties.items() if k not in existing}
+    if missing:
+        notion.request(
+            path=f"databases/{db_id}", method="PATCH",
+            body={"properties": missing},
+        )
+        logger.info(f"DB 속성 추가: {list(missing.keys())}")
+
+
 def get_or_create_database(env_key: str, db_name: str, db_properties: dict, title_name: str = "공고명") -> str:
     """env_key 환경변수에 DB ID가 있으면 반환, 없으면 신규 생성 후 .env에 저장"""
     db_id = os.getenv(env_key, "").strip().strip("'\"")
     if db_id:
+        _ensure_db_properties(db_id, db_properties)
         return db_id
 
     notion = get_notion_client()

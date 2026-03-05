@@ -132,7 +132,7 @@ py -m batch.setup_scheduler
 | `PG_SZ` | `100` | 페이지 크기 (API 실측 최대값) |
 
 **응답 날짜 필드 (요청 파라미터명과 다름):**
-- 요청: `PAN_ST_DT` / `PAN_ED_DT` → 응답: `PAN_NT_ST_DT` (공고시작일) / `CLSG_DT` (마감일)
+- 요청: `PAN_ST_DT` / `PAN_ED_DT` → 응답: `PAN_NT_ST_DT` (공고시작일) / `CLSG_DT` (마감일) / `PAN_DT` (공고일자)
 
 **유효한 UPP_AIS_TP_CD (인천 기준, 01~25 전수 확인):**
 
@@ -182,7 +182,7 @@ py -m batch.setup_scheduler
 - `LH_TP_CODES = ["13", "06"]` — 매입/전세임대 + 임대주택(행복주택, 국민임대 등)
 - `asyncio.gather`로 두 유형 병렬 조회 → PAN_ID 기준 중복 제거 병합
 - 키워드 필터 없음 (두 유형 모두 거의 100% 입주자 모집 공고)
-- `upsert_all()` 반환: `{"new", "updated", "closed", "failed", "new_notices"}`
+- `upsert_all()` 반환: `{"new", "updated", "closed", "failed", "new_notices", "failed_notices"}`
 - Notion DB: "LH 인천 임대주택 공고" (`NOTION_DATABASE_ID`)
 
 **IH 배치:**
@@ -190,7 +190,7 @@ py -m batch.setup_scheduler
 - server-side `sj="입주자"` + client-side `_is_recruitment_notice()` 필터 (모집+공고 포함, 노이즈 키워드 제외)
 - 노이즈 키워드: 마감, 취소, 결과, 계약, 입주안내, 변경, 정정
 - `ih_api.fetch_all_ih_notices()` → `ih_upsert_all(notices)`
-- `upsert_all()` 반환: `{"new", "updated", "closed", "failed", "new_notices"}` (LH와 동일 구조)
+- `upsert_all()` 반환: `{"new", "updated", "closed", "failed", "new_notices", "failed_notices"}` (LH와 동일 구조)
 - `close_expired_notices(active_links, page_cache)` — API 조회 결과에 없는 공고를 "마감" 처리 (차집합 비교)
 - Notion DB: "IH 인천도시공사 분양임대 공고" (`IH_NOTION_DATABASE_ID`)
 - DB 스키마에 "상태" select 속성 포함 (모집중/마감)
@@ -199,14 +199,16 @@ py -m batch.setup_scheduler
 **배치 리포트:**
 - `report_writer.py` — 배치 실행 결과를 Notion DB에 자동 기록
 - Notion DB: "배치 실행 리포트" (`REPORT_DATABASE_ID`, 최초 실행 시 자동 생성)
-- 기록 항목: 실행일시, 소요시간, LH 신규·업데이트·마감, IH 신규·업데이트·마감 건수, 상태(성공/부분실패/실패)
-- 신규 공고 목록을 페이지 본문에 bullet list로 포함
+- 기록 항목: 실행일시, 소요시간, LH 신규·업데이트·마감·실패, IH 신규·업데이트·마감·실패 건수, 상태(성공/부분실패/실패)
+- 신규 공고 및 실패 공고 목록을 페이지 본문에 bullet list로 포함
 
 **공통:**
 - `notion_base.py` — Notion 클라이언트 지연 초기화, `rich_text`/`select`/`query_db`/`paginate_query`/`get_or_create_database` 공통 함수 제공
-- `get_or_create_database(env_key, db_name, db_properties, title_name="공고명")` — `title_name`으로 title 속성명 지정 가능
+- `get_or_create_database(env_key, db_name, db_properties, title_name="공고명")` — `title_name`으로 title 속성명 지정 가능, 기존 DB에 누락 속성 자동 추가 (`_ensure_db_properties`)
 - `config.py` — `.env` 로딩 1회, `OPEN_API_KEY`/`NOTION_TOKEN`/`NOTION_PARENT_PAGE_ID` 일원화
 - Notion DB는 최초 실행 시 자동 생성, DB ID를 `.env`에 저장
+- **Zero-result guard**: `close_expired_notices()`에서 API 결과 0건 + Notion 활성 공고 존재 시 마감 처리 건너뜀 (API 장애 시 전량 마감 방지)
+- **Failed notices 추적**: upsert 실패 공고를 `failed_notices` 리스트로 반환 → 리포트에 포함
 
 ## Environment Variables (`.env`)
 

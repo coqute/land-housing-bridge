@@ -29,7 +29,8 @@ Claude AI에게 공고 조회 도구를 제공합니다.
 - **IH 배치** — 최근 90일 입주자 모집 공고 → Notion DB upsert (link 기준)
   - server-side `sj="입주자"` + client-side `_is_recruitment_notice()` 필터 (모집+공고 필수, 노이즈 키워드 제외)
   - API 조회 결과 차집합으로 만료 공고 자동 "마감" 처리
-- **배치 리포트** — 실행 결과(LH·IH 신규·업데이트·마감 건수, 소요시간, 상태)를 Notion DB에 자동 기록
+- **배치 리포트** — 실행 결과(LH·IH 신규·업데이트·마감·실패 건수, 소요시간, 상태)를 Notion DB에 자동 기록
+  - 실패 공고 목록을 페이지 본문에 bullet list로 포함
 - **자동 실행** — Windows Task Scheduler로 매일 09:00 실행
 
 ## 디렉토리 구조

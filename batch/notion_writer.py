@@ -188,6 +188,11 @@ def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dic
             if pan_id:
                 active_in_notion[pan_id] = page["id"]
 
+    # Zero-result guard: API 결과 0건인데 Notion에 활성 공고가 있으면 장애 의심
+    if not current_pan_ids and active_in_notion:
+        logger.warning(f"Zero-result guard: API 결과 0건, Notion 활성 공고 {len(active_in_notion)}건 — 마감 처리 건너뜀")
+        return 0
+
     expired = {pan_id: page_id for pan_id, page_id in active_in_notion.items()
                if pan_id not in current_pan_ids}
 
@@ -224,6 +229,7 @@ def upsert_all(notices: list[dict]) -> dict:
 
     new, updated, failed = 0, 0, 0
     new_notices: list[dict] = []
+    failed_notices: list[dict] = []
 
     for notice in notices:
         try:
@@ -236,8 +242,16 @@ def upsert_all(notices: list[dict]) -> dict:
         except Exception as e:
             logger.error(f"  [오류] {notice.get('PAN_NM', '?')} (PAN_ID={notice.get('PAN_ID', '?')}): {e}")
             failed += 1
+            failed_notices.append({
+                "PAN_ID": notice.get("PAN_ID", ""),
+                "PAN_NM": notice.get("PAN_NM", ""),
+                "error": str(e),
+            })
 
     closed = close_expired_notices(db_id, current_pan_ids, page_cache=page_cache)
 
     logger.info(f"Notion 저장 완료 - 신규: {new}, 업데이트: {updated}, 마감: {closed}, 실패: {failed}")
-    return {"new": new, "updated": updated, "closed": closed, "failed": failed, "new_notices": new_notices}
+    return {
+        "new": new, "updated": updated, "closed": closed, "failed": failed,
+        "new_notices": new_notices, "failed_notices": failed_notices,
+    }

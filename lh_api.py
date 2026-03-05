@@ -138,6 +138,7 @@ async def fetch_lh_notices(
                 "PAN_SS": item.get('PAN_SS', ''),
                 "PAN_NT_ST_DT": item.get('PAN_NT_ST_DT', ''),   # 공고 시작일 (응답 필드명)
                 "CLSG_DT": item.get('CLSG_DT', ''),             # 공고 마감일 (응답 필드명)
+                "PAN_DT": item.get('PAN_DT', ''),               # 공고일자
                 "DTL_URL": item.get('DTL_URL', ''),
                 "SPL_INF_TP_CD": item.get('SPL_INF_TP_CD', ''),
                 "CCR_CNNT_SYS_DS_CD": item.get('CCR_CNNT_SYS_DS_CD', ''),

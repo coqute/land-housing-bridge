@@ -55,6 +55,25 @@ async def _gather_lh_notices(days: int, **kwargs) -> list[dict]:
     return list(seen.values())
 
 
+def _format_lh_notice_header(notice: dict) -> list[str]:
+    """LH 공고 1건의 헤더 라인을 생성."""
+    pan_ss = notice.get("PAN_SS", "")
+    pan_nm = notice.get("PAN_NM", "")
+    pan_id = notice.get("PAN_ID", "")
+    ais_tp = notice.get("AIS_TP_CD_NM", "")
+    start_dt = notice.get("PAN_NT_ST_DT", "")
+    end_dt = notice.get("CLSG_DT", "")
+    dtl_url = notice.get("DTL_URL", "")
+
+    lines = [
+        f"### [{pan_ss}] {pan_nm} (ID: {pan_id})",
+        f"  - 유형: {ais_tp} | 기간: {start_dt} ~ {end_dt}",
+    ]
+    if dtl_url:
+        lines.append(f"  - 상세: {dtl_url}")
+    return lines
+
+
 def _format_supply_rows(supply_columns: dict, supply_details: list[dict]) -> list[str]:
     """공급정보 상세를 마크다운 bullet 행 리스트로 변환."""
     rows = []
@@ -116,13 +135,10 @@ async def get_incheon_lh_notices(
 
     results = []
     for notice in notices:
-        pan_ss = notice.get("PAN_SS", "")
-        pan_name = notice.get("PAN_NM", "")
-        pan_id = notice.get("PAN_ID", "")
         supply_columns = notice.get("supply_columns", {})
         supply_details = notice.get("supply_details", [])
 
-        results.append(f"### [{pan_ss}] {pan_name} (ID: {pan_id})")
+        results.extend(_format_lh_notice_header(notice))
 
         if supply_details:
             results.extend(_format_supply_rows(supply_columns, supply_details))
@@ -285,12 +301,13 @@ async def search_all_notices(
         lh_notices = results[0]
         lines.append(f"### LH ({len(lh_notices)}건)")
         for n in lh_notices:
-            pan_ss = n.get("PAN_SS", "")
-            pan_nm = n.get("PAN_NM", "")
-            pan_id = n.get("PAN_ID", "")
+            header = _format_lh_notice_header(n)
+            # search 결과는 bullet 형식 — heading을 bullet로 변환
+            lines.append(header[0].replace("### ", "- "))
+            lines.extend(header[1:])
             spl_tp = n.get("SPL_INF_TP_CD", "")
             ccr_cd = n.get("CCR_CNNT_SYS_DS_CD", "")
-            lines.append(f"- [{pan_ss}] {pan_nm} (ID: {pan_id}, SPL: {spl_tp}, CCR: {ccr_cd})")
+            lines.append(f"  - SPL: {spl_tp} | CCR: {ccr_cd}")
         lines.append("")
 
     # IH

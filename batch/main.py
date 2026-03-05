@@ -67,7 +67,7 @@ async def run_lh_batch():
 
     if not notices:
         logger.info("LH 해당 공고 없음.")
-        return True, {"new": 0, "updated": 0, "closed": 0, "failed": 0, "new_notices": []}
+        return True, {"new": 0, "updated": 0, "closed": 0, "failed": 0, "new_notices": [], "failed_notices": []}
 
     try:
         result = lh_upsert_all(notices)

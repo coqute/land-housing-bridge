@@ -73,6 +73,13 @@ def close_expired_notices(
     - API에서 삭제됨
     - 제목 변경으로 필터 탈락 (예: "모집 공고" → "모집 결과")
     """
+    # Zero-result guard: API 결과 0건인데 Notion에 활성 공고가 있으면 장애 의심
+    if not active_links:
+        non_closed = sum(1 for info in page_cache.values() if info["status"] != "마감")
+        if non_closed:
+            logger.warning(f"Zero-result guard: API 결과 0건, Notion 활성 공고 {non_closed}건 — 마감 처리 건너뜀")
+            return 0
+
     notion = get_notion_client()
     closed = 0
 
@@ -141,6 +148,7 @@ def upsert_all(notices: list[dict]) -> dict:
 
     new, updated, failed = 0, 0, 0
     new_notices: list[dict] = []
+    failed_notices: list[dict] = []
 
     for notice in notices:
         try:
@@ -153,9 +161,17 @@ def upsert_all(notices: list[dict]) -> dict:
         except Exception as e:
             logger.error(f"  [오류] {notice.get('sj', '?')}: {e}")
             failed += 1
+            failed_notices.append({
+                "sj": notice.get("sj", ""),
+                "link": notice.get("link", ""),
+                "error": str(e),
+            })
 
     active_links = {n.get("link") for n in notices if n.get("link")}
     closed = close_expired_notices(active_links, page_cache)
 
     logger.info(f"IH Notion 저장 완료 - 신규: {new}, 업데이트: {updated}, 마감: {closed}, 실패: {failed}")
-    return {"new": new, "updated": updated, "closed": closed, "failed": failed, "new_notices": new_notices}
+    return {
+        "new": new, "updated": updated, "closed": closed, "failed": failed,
+        "new_notices": new_notices, "failed_notices": failed_notices,
+    }
