@@ -18,6 +18,10 @@ DB_PROPERTIES = {
     "IH마감":       {"number": {}},
     "LH실패":       {"number": {}},
     "IH실패":       {"number": {}},
+    "LH알림":       {"number": {}},
+    "문서처리":     {"number": {}},
+    "청크생성":     {"number": {}},
+    "이미지분석":   {"number": {}},
     "상태":         {"select": {}},
 }
 
@@ -86,6 +90,8 @@ def write_report(
     elapsed_seconds: float,
     lh_ok: bool,
     ih_ok: bool,
+    lh_notified: int = 0,
+    doc_stats: dict | None = None,
 ):
     """배치 실행 리포트 1건을 Notion DB에 생성합니다."""
     db_id = get_or_create_database(
@@ -112,15 +118,35 @@ def write_report(
         "IH마감":     {"number": ih.get("closed", 0)},
         "LH실패":     {"number": lh.get("failed", 0)},
         "IH실패":     {"number": ih.get("failed", 0)},
+        "LH알림":     {"number": lh_notified},
+        "문서처리":   {"number": (doc_stats or {}).get("processed", 0)},
+        "청크생성":   {"number": (doc_stats or {}).get("chunks", 0)},
+        "이미지분석": {"number": (doc_stats or {}).get("images_analyzed", 0)},
         "상태":       select(status),
     }
 
     detail_blocks = _build_detail_blocks(lh_result, ih_result)
 
     notion = get_notion_client()
-    notion.pages.create(
+    page = notion.pages.create(
         parent={"type": "database_id", "database_id": db_id},
         properties=properties,
         children=detail_blocks,
     )
     logger.info(f"배치 리포트 생성 완료: {title}")
+
+    # 실패 시 Notion 코멘트로 즉시 알림 (Notion 알림 트리거)
+    if status != "성공":
+        failed_parts = []
+        if not lh_ok:
+            failed_parts.append(f"LH 실패 ({lh.get('failed', 0)}건)")
+        if not ih_ok:
+            failed_parts.append(f"IH 실패 ({ih.get('failed', 0)}건)")
+        comment_text = f"[배치 {status}] {', '.join(failed_parts) or status}"
+        try:
+            notion.comments.create(
+                parent={"page_id": page["id"]},
+                rich_text=[{"type": "text", "text": {"content": comment_text}}],
+            )
+        except Exception as e:
+            logger.warning(f"실패 알림 코멘트 생성 실패: {e}")

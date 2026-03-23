@@ -20,6 +20,8 @@ DB_PROPERTIES = {
     "공고기간":  {"rich_text": {}},
     "상세URL":   {"url": {}},
     "수집일시":  {"date": {}},
+    "접수마감일": {"date": {}},
+    "알림완료":  {"checkbox": {}},
 }
 
 
@@ -28,6 +30,8 @@ DB_PROPERTIES = {
 # ---------------------------------------------------------------------------
 def _build_properties(notice: dict, collected_at: str) -> dict:
     period = f"{notice.get('PAN_NT_ST_DT', '')} ~ {notice.get('CLSG_DT', '')}"
+    clsg_dt = notice.get("CLSG_DT", "")
+    deadline = {"date": {"start": clsg_dt.replace(".", "-")}} if clsg_dt else {"date": None}
     return {
         "공고명":   {"title": rich_text(notice.get("PAN_NM", ""))},
         "공고ID":   {"rich_text": rich_text(notice.get("PAN_ID", ""))},
@@ -37,6 +41,8 @@ def _build_properties(notice: dict, collected_at: str) -> dict:
         "공고기간": {"rich_text": rich_text(period)},
         "상세URL":  {"url": notice.get("DTL_URL") or None},
         "수집일시": {"date": {"start": collected_at}},
+        "접수마감일": deadline,
+        "알림완료": {"checkbox": False},
     }
 
 
@@ -247,6 +253,10 @@ def upsert_all(notices: list[dict]) -> dict:
                 "PAN_NM": notice.get("PAN_NM", ""),
                 "error": str(e),
             })
+
+    supply_errors = sum(1 for n in notices if n.get("supply_error"))
+    if supply_errors:
+        logger.warning(f"공급정보 조회 실패: {supply_errors}건")
 
     closed = close_expired_notices(db_id, current_pan_ids, page_cache=page_cache)
 

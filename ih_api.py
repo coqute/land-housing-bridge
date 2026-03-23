@@ -1,5 +1,6 @@
 """공통 IH(인천도시공사) API 로직 — server/lh_mcp.py 와 batch/ 에서 사용합니다."""
 import logging
+from urllib.parse import urlparse, urlencode, parse_qs
 import httpx
 from config import OPEN_API_KEY as API_KEY
 from http_utils import request_with_retry
@@ -7,6 +8,19 @@ from http_utils import request_with_retry
 NOTICE_URL = "https://apis.data.go.kr/B552831/ih/slls-posts"
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_link(url: str) -> str:
+    """IH 공고 link를 정규화하여 중복 비교 정확도를 높입니다."""
+    if not url:
+        return url
+    parsed = urlparse(url)
+    scheme = "https"
+    path = parsed.path.rstrip("/")
+    query = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items(),
+                             key=lambda x: x[0]),
+                      doseq=True)
+    return f"{scheme}://{parsed.netloc}{path}{'?' + query if query else ''}"
 
 
 async def fetch_ih_notices(
@@ -67,6 +81,10 @@ async def fetch_ih_notices(
     items = body.get("posts", []) or body.get("data", [])
     if not isinstance(items, list):
         return [], 0
+
+    for item in items:
+        if item.get("link"):
+            item["link"] = normalize_link(item["link"])
 
     total_pages = body.get("totalPageNo", 1)
     return items, total_pages

@@ -35,18 +35,21 @@ def _extract_supply_list(response_data) -> list:
     return result
 
 
-async def _fetch_supply(client: httpx.AsyncClient, item: dict, tp_code: str) -> tuple[dict, list]:
+async def _fetch_supply(client: httpx.AsyncClient, item: dict, tp_code: str) -> tuple[dict, list, str | None]:
     """공고 1건의 공급정보를 조회.
 
     SPL_INF_TP_CD 또는 CCR_CNNT_SYS_DS_CD가 없으면 API 호출 없이 빈값 반환.
     Semaphore로 동시 요청 수를 제한하여 429 Too Many Requests 방지.
+
+    Returns:
+        tuple[dict, list, str | None]: (컬럼 정보, 상세 목록, 에러 메시지 또는 None)
     """
     pan_id = item.get('PAN_ID', '')
     spl_tp = item.get('SPL_INF_TP_CD', '')
     ccr_cd = item.get('CCR_CNNT_SYS_DS_CD', '')
 
     if not spl_tp or not ccr_cd:
-        return {}, []
+        return {}, [], None
 
     try:
         async with _SUPPLY_SEMAPHORE:
@@ -61,10 +64,10 @@ async def _fetch_supply(client: httpx.AsyncClient, item: dict, tp_code: str) -> 
         cols = _extract_ds_list(supply_data, 'dsList01Nm')
         supply_columns = cols[0] if cols else {}
         supply_details = _extract_supply_list(supply_data)
-        return supply_columns, supply_details
+        return supply_columns, supply_details, None
     except Exception as e:
         logger.warning(f"공급정보 조회 실패 (PAN_ID={pan_id}): {e}")
-        return {}, []
+        return {}, [], str(e)
 
 
 async def fetch_lh_notices(
@@ -129,7 +132,7 @@ async def fetch_lh_notices(
         supply_results = await asyncio.gather(*supply_tasks)
 
         results = []
-        for item, (supply_columns, supply_details) in zip(raw_list, supply_results):
+        for item, (supply_columns, supply_details, supply_error) in zip(raw_list, supply_results):
             results.append({
                 "PAN_ID": item.get('PAN_ID', ''),
                 "PAN_NM": item.get('PAN_NM', ''),
@@ -144,6 +147,7 @@ async def fetch_lh_notices(
                 "CCR_CNNT_SYS_DS_CD": item.get('CCR_CNNT_SYS_DS_CD', ''),
                 "supply_columns": supply_columns,
                 "supply_details": supply_details,
+                "supply_error": supply_error,
             })
 
         return results
@@ -166,5 +170,5 @@ async def fetch_supply_detail(
         "CCR_CNNT_SYS_DS_CD": ccr_cnnt_sys_ds_cd,
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
-        columns, details = await _fetch_supply(client, item, tp_code)
-    return {"supply_columns": columns, "supply_details": details}
+        columns, details, error = await _fetch_supply(client, item, tp_code)
+    return {"supply_columns": columns, "supply_details": details, "supply_error": error}
