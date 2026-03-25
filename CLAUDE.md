@@ -4,11 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-이 프로젝트는 세 가지 역할을 합니다.
+이 프로젝트는 두 가지 역할을 합니다.
 
-1. **MCP 서버** (`server/`) — Claude AI에게 LH·IH 공고 조회 + AI 분석 도구를 노출
-2. **배치 처리** (`batch/`) — LH·IH 공고를 주기적으로 조회하여 Notion DB에 저장 + 문서 임베딩
-3. **AI 분석** (root modules) — Ollama 기반 의미 검색·문서 분석·자격 매칭
+1. **MCP 서버** (`server/`) — Claude AI에게 LH·IH 공고 조회 도구를 노출
+2. **배치 처리** (`batch/`) — LH·IH 공고를 주기적으로 조회하여 Notion DB에 저장 (PDF 첨부파일 포함)
 
 대상 데이터: 인천 지역 LH(한국토지주택공사) 및 IH(인천도시공사) 임대주택 공고 (한국 공공데이터포털 API)
 
@@ -19,9 +18,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **HTTPx** — 비동기 HTTP 클라이언트
 - **notion-client 3.0.0** — Notion API 클라이언트 (`batch/`)
 - **python-dotenv** — `.env` 파일 로드
-- **Ollama** — 로컬 AI (임베딩: qwen3-embedding:4b, 비전: qwen2.5-vl/qwen3-vl)
-- **NumPy** — 벡터 연산 (코사인 유사도)
-- **PyMuPDF** — PDF 텍스트/이미지 추출
 - **BeautifulSoup4** — HTML 파싱 (공고 상세 페이지 스크래핑)
 
 ## Directory Structure
@@ -29,29 +25,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 .mcp.json               # Claude Code MCP 설정 (gitignore됨, API 키 포함)
 .env                    # 환경변수 (gitignore됨)
-config.py               # 환경변수 일원화 (.env 로딩 + 공유 상수 + Ollama 설정)
+config.py               # 환경변수 일원화 (.env 로딩 + 공유 상수)
 http_utils.py           # HTTP 재시도 유틸리티 (exponential backoff)
 lh_api.py               # 공통 LH API 로직 (server/와 batch/ 공유)
 ih_api.py               # IH(인천도시공사) API 로직 (server/와 batch/ 공유)
-ollama_client.py        # Ollama HTTP 클라이언트 (임베딩·비전·생성, GPU lock)
-vector_store.py         # SQLite + NumPy 벡터 저장소 (매트릭스 캐시 검색)
-text_chunker.py         # 한국어 공고 텍스트 청킹 (섹션 기반 + 고정 크기)
-doc_processor.py        # 문서 다운로드·PDF 추출·HTML 파싱 (순수 I/O)
-data/                   # 런타임 데이터 (gitignore됨)
-├── vector.db           # SQLite 벡터 DB (공고·청크·임베딩)
-└── docs/               # 다운로드된 PDF·이미지 캐시
+doc_processor.py        # 공고 상세 페이지 스크래핑 (PDF URL 추출)
 server/
-└── lh_mcp.py           # FastMCP 서버 — LH·IH 도구 6개 + AI 도구 4개
+└── lh_mcp.py           # FastMCP 서버 — LH·IH 도구 6개
 batch/
-├── main.py             # 배치 진입점 — LH + IH + 문서처리 + 리포트
-├── doc_pipeline.py     # 문서 처리 파이프라인 (스크래핑→추출→청킹→임베딩)
+├── main.py             # 배치 진입점 — LH + IH + PDF 스크래핑 + 리포트
 ├── notion_base.py      # Notion 공통 로직 (Client 지연초기화, 헬퍼, 페이지네이션, DB 생성)
 ├── notion_writer.py    # LH Notion DB upsert (PAN_ID 기준, notion_base 사용)
 ├── ih_notion_writer.py # IH Notion DB upsert (link 기준, notion_base 사용)
 ├── notify_upcoming.py  # 마감 임박 공고 Notion 코멘트 알림
 ├── report_writer.py    # 배치 실행 리포트 Notion DB 생성
 ├── setup_scheduler.py  # Windows Task Scheduler 등록
-└── requirements.txt    # notion-client, httpx, python-dotenv, numpy, pymupdf, bs4
+└── requirements.txt    # notion-client, httpx, python-dotenv, bs4
 ```
 
 ## Running
@@ -72,19 +61,14 @@ py -m batch.setup_scheduler
 ## MCP Server (`server/lh_mcp.py`)
 
 - `FastMCP("LH_Incheon_Notice_Server")` 인스턴스
-- 10개 도구 노출 (기존 6개 + AI 4개):
+- 6개 도구 노출:
   - `get_incheon_lh_notices()` — LH 공고 + 공급정보 조회
   - `get_ih_notices()` — IH 공고 전체 페이지 조회 (fetch_all_ih_notices 사용)
   - `get_notice_summary()` — LH+IH 공고 현황 요약 (최근 N일)
   - `search_all_notices()` — LH+IH 통합 키워드 검색
   - `get_upcoming_deadlines()` — 마감 임박 LH 공고 (D-N일 이내, D-day 순 정렬)
   - `get_supply_detail()` — 특정 LH 공고의 공급정보 상세 조회
-  - `semantic_search()` — 자연어 의미 기반 공고 검색 (Ollama 필요)
-  - `analyze_notice()` — 특정 공고 심층 분석 (PDF 자격요건·소득기준 추출)
-  - `match_eligibility()` — 사용자 조건으로 적합 공고 매칭
-  - `find_similar_notices()` — 유사 공고 발견
 - 환경변수 `OPEN_API_KEY` 필요 (`.mcp.json`의 `env` 필드에 설정, 시작 시 `validate_env` 검증)
-- AI 도구는 Ollama 미연결 시 안내 메시지 반환 (graceful degradation)
 
 **`get_incheon_lh_notices` 파라미터:**
 
@@ -102,7 +86,8 @@ py -m batch.setup_scheduler
 | 파라미터 | 기본값 | 설명 |
 |---|---|---|
 | `days` | `30` | 조회 기간 (일) |
-| `tp_code` | `13` | LH 공고유형코드 |
+
+LH는 `LH_TP_CODES`(13+06) 전체 + 인천+전국 공고 자동 검색.
 
 **`search_all_notices` 파라미터:**
 
@@ -112,12 +97,15 @@ py -m batch.setup_scheduler
 | `days` | `365` | 조회 기간 (일) |
 | `category` | `""` | IH 공고 구분 (분양/임대) |
 
+LH는 `LH_TP_CODES`(13+06) 전체 + 인천+전국 공고에서 키워드 검색.
+
 **`get_upcoming_deadlines` 파라미터:**
 
 | 파라미터 | 기본값 | 설명 |
 |---|---|---|
 | `days` | `7` | 마감까지 남은 일수 |
-| `tp_code` | `13` | LH 공고유형코드 |
+
+LH는 `LH_TP_CODES`(13+06) 전체 + 인천+전국 공고 중 마감 임박 건 표시.
 
 **`get_supply_detail` 파라미터:**
 
@@ -129,7 +117,8 @@ py -m batch.setup_scheduler
 | `tp_code` | `13` | 공고유형코드 |
 
 **MCP 내부 헬퍼:**
-- `_gather_lh_notices(days, **kwargs)` — 활성(lookback_days=0) + 과거(lookback_days=days) 2회 조회 → PAN_ID 중복 제거 병합. LH API 날짜 파라미터 존재 시 활성 공고 제외 문제 해결.
+- `_gather_lh_notices(days, tp_codes=None, **kwargs)` — 활성+과거 2회 조회 × tp_code별 → `dedup_by_pan_id()` 병합. `tp_codes` 전달 시 다중 유형 검색.
+- `_gather_all_lh_notices(days, tp_codes, **kwargs)` — 인천(CNP_CD=28) + 전국(CNP_CD 없음) 이중 조회 → `dedup_by_pan_id()` 병합. `search_all_notices`, `get_notice_summary`, `get_upcoming_deadlines`에서 사용. 인천 조회가 먼저이므로 dedup 시 인천 결과 우선.
 - `_format_lh_notice_header(notice)` — LH 공고 헤더 생성 (PAN_DT·SPL/CCR 코드 포함)
 - `_format_supply_rows()` — 공급정보를 마크다운 테이블로 변환 (건수 표시)
 
@@ -161,7 +150,7 @@ py -m batch.setup_scheduler
 | 파라미터 | 값 | 설명 |
 |---|---|---|
 | `UPP_AIS_TP_CD` | `13` | 공고유형코드 |
-| `CNP_CD` | `28` | 지역코드 |
+| `CNP_CD` | `28` | 지역코드. **빈 문자열이면 파라미터 제외 → 전국 조회.** 전세임대 등 전국 공고는 CNP_CD=28에 미반환됨 |
 | `PAN_SS` | `공고중` | 공고상태. 빈 문자열 전달 시 0건 반환 (파라미터 자체를 제외해야 전체 조회됨) |
 | `PAN_ST_DT` / `PAN_ED_DT` | `YYYY.MM.DD` | 조회 기간. **있으면 활성 공고(공고중/접수중) 제외됨** → 현재 활성 공고 조회 시 제외 필수 |
 | `PG_SZ` | `100` | 페이지 크기 (API 실측 최대값) |
@@ -184,6 +173,10 @@ py -m batch.setup_scheduler
 **공급정보 파라미터:** `SPL_INF_TP_CD`, `CCR_CNNT_SYS_DS_CD`를 공고 목록 item에서 가져와야 함 (빈값 전달 시 데이터 없음)
 
 **공급정보 독립 조회:** `lh_api.fetch_supply_detail(pan_id, spl_inf_tp_cd, ccr_cnnt_sys_ds_cd, tp_code)` — MCP `get_supply_detail` 도구에서 사용
+
+**PAN_ID 중복 제거:** `lh_api.dedup_by_pan_id(*notice_lists)` — MCP `_gather_lh_notices()`와 배치 `run_lh_batch()`에서 공유
+
+**전국 공고 처리:** CNP_CD=28에 미반환되는 전국 공고(전세임대 수시모집 등)는 CNP_CD 없이 별도 조회 후 `dedup_by_pan_id()`로 병합. 전국 공고의 CNP_CD_NM은 첫 번째 지역으로 채워지는 API 특성이 있어 CNP_CD_NM 기반 필터링은 불가
 
 ## IH API (`ih_api.py`)
 
@@ -216,14 +209,15 @@ py -m batch.setup_scheduler
 ## Batch (`batch/`)
 
 **LH 배치:**
-- `LH_TP_CODES = ["13", "06"]` — 매입/전세임대 + 임대주택(행복주택, 국민임대 등)
-- `asyncio.gather`로 두 유형 병렬 조회 → PAN_ID 기준 중복 제거 병합
+- `config.LH_TP_CODES = ["13", "06"]` — 매입/전세임대 + 임대주택(행복주택, 국민임대 등)
+- 인천(CNP_CD=28) + 전국(CNP_CD 없음) 이중 조회 → `dedup_by_pan_id()` 병합
+- `status=""` — 공고중+접수중 모든 활성 공고 포착 (접수중 누락 방지)
 - 키워드 필터 없음 (두 유형 모두 거의 100% 입주자 모집 공고)
 - `upsert_all()` 반환: `{"new", "updated", "closed", "failed", "new_notices", "failed_notices"}`
 - Notion DB: "LH 인천 임대주택 공고" (`NOTION_DATABASE_ID`)
 
 **IH 배치:**
-- 최근 90일 입주자 모집 공고 조회
+- 최근 `IH_LOOKBACK_DAYS`(90)일 입주자 모집 공고 조회
 - server-side `sj="입주자"` + client-side `_is_recruitment_notice()` 필터 (모집+공고 포함, 노이즈 키워드 제외)
 - 노이즈 키워드: 마감, 취소, 결과, 계약, 입주안내, 변경, 정정
 - `ih_api.fetch_all_ih_notices()` → `ih_upsert_all(notices)`
@@ -232,6 +226,18 @@ py -m batch.setup_scheduler
 - Notion DB: "IH 인천도시공사 분양임대 공고" (`IH_NOTION_DATABASE_ID`)
 - DB 스키마에 "상태" select 속성 포함 (모집중/마감)
 - upsert 식별자: `link` (고유 ID 없음)
+
+**첨부파일 스크래핑 (`doc_processor.py`):**
+- 공통 스켈레톤 `_scrape_detail(url, extract_links_fn, client=None)` + 사이트별 링크 추출 전략
+- `create_scrape_client()` — 스크래핑용 httpx 클라이언트 팩토리 (배치에서 공유 클라이언트 생성)
+- `_extract_lh_links()`: `javascript:fileDownLoad('파일ID')` 정규식 파싱 → `https://apply.lh.or.kr/lhapply/lhFile.do?fileid=ID` URL 재구성
+- `_extract_ih_links()`: `FileDown` 서블릿 패턴 + `<a>` 텍스트/href 확장자로 파일 링크 식별
+- 공개 API: `scrape_lh_detail(dtl_url, client=None)`, `scrape_ih_detail(link_url, client=None)` — 내부적으로 `_scrape_detail` 위임. `client` 전달 시 공유 클라이언트 사용.
+- 반환: `{"files": [{"name": "파일명", "url": "다운로드URL"}, ...], "html_text": str}`
+- 본문 텍스트: 최대 5000자 (`_MAX_TEXT_LENGTH`) 통일 적용
+- Notion DB "첨부파일" files 속성에 external URL로 저장 (파일명 직접 사용)
+- best-effort: 스크래핑 실패 시 빈 리스트, 공고 upsert에 영향 없음
+- `Semaphore(3)` 병렬 스크래핑 + 1초 딜레이로 정부 사이트 rate limit 준수 (LH/IH 각각)
 
 **배치 리포트:**
 - `report_writer.py` — 배치 실행 결과를 Notion DB에 자동 기록
@@ -242,7 +248,8 @@ py -m batch.setup_scheduler
 **공통:**
 - `notion_base.py` — Notion 클라이언트 지연 초기화, `rich_text`/`select`/`query_db`/`paginate_query`/`get_or_create_database` 공통 함수 제공
 - `get_or_create_database(env_key, db_name, db_properties, title_name="공고명")` — `title_name`으로 title 속성명 지정 가능, 기존 DB에 누락 속성 자동 추가 (`_ensure_db_properties`)
-- `config.py` — `.env` 로딩 1회, `OPEN_API_KEY`/`NOTION_TOKEN`/`NOTION_PARENT_PAGE_ID` 일원화, `validate_env()` 환경변수 사전 검증
+- `config.py` — `.env` 로딩 1회, `OPEN_API_KEY`/`NOTION_TOKEN`/`NOTION_PARENT_PAGE_ID` 일원화, `LH_TP_CODES` 공유 상수, `validate_env()` 환경변수 사전 검증
+- **LH+IH 병렬 실행**: `asyncio.gather(run_lh_batch(), run_ih_batch())` — 서로 다른 API/Notion DB 사용하므로 충돌 없음
 - Notion DB는 최초 실행 시 자동 생성, DB ID를 `.env`에 저장
 - **Zero-result guard**: `close_expired_notices()`에서 API 결과 0건 + Notion 활성 공고 존재 시 마감 처리 건너뜀 (API 장애 시 전량 마감 방지)
 - **Failed notices 추적**: upsert 실패 공고를 `failed_notices` 리스트로 반환 → 리포트에 포함
@@ -265,59 +272,7 @@ NOTION_PARENT_PAGE_ID=... # Notion 부모 페이지 ID
 NOTION_DATABASE_ID=...    # LH Notion DB ID (배치 최초 실행 후 자동 저장)
 IH_NOTION_DATABASE_ID=... # IH Notion DB ID (배치 최초 실행 후 자동 저장)
 REPORT_DATABASE_ID=...    # 배치 리포트 Notion DB ID (배치 최초 실행 후 자동 저장)
-
-# Optional — Ollama AI (기본값 있음)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_EMBED_MODEL=qwen3-embedding:4b
-OLLAMA_VISION_MODEL=                  # 빈값=자동감지 (qwen3-vl > qwen2.5-vl > llava)
 ```
-
-## Ollama AI Integration
-
-**핵심 원칙**: Ollama는 선택적 enhancement — 미실행 시 기존 기능 100% 정상 동작
-
-### 모듈 구조
-
-| 모듈 | 역할 |
-|---|---|
-| `ollama_client.py` | Ollama HTTP 클라이언트 (embed·vision·generate), GPU lock, 비전 모델 자동감지 |
-| `vector_store.py` | SQLite + NumPy 벡터 저장소, 매트릭스 캐시 기반 고속 검색 |
-| `text_chunker.py` | 한국어 공고 PDF 섹션 기반 텍스트 청킹 |
-| `doc_processor.py` | PDF 텍스트/이미지 추출, 상세 페이지 스크래핑 |
-| `batch/doc_pipeline.py` | 배치 문서 처리 오케스트레이션 |
-
-### 벡터 검색 흐름
-
-```
-공고 수집 (API) → 상세 페이지 스크래핑 → PDF 다운로드
-→ PyMuPDF 텍스트 추출 → 섹션 기반 청킹
-→ qwen3-embedding:4b 임베딩 → SQLite 저장
-→ MCP 도구로 의미 기반 검색·분석·매칭
-```
-
-### MCP AI 도구 (4개)
-
-| 도구 | 설명 | 핵심 파라미터 |
-|---|---|---|
-| `semantic_search` | 자연어 의미 기반 공고 검색 | query, top_k, section, source |
-| `analyze_notice` | 공고 심층 분석 (PDF 자격요건 추출) | notice_id, url, source |
-| `match_eligibility` | 사용자 조건으로 적합 공고 매칭 | conditions, top_k |
-| `find_similar_notices` | 유사 공고 발견 | notice_id, source, top_k |
-
-### 비전 모델 활용
-
-- 비전 모델 우선순위: qwen3-vl > qwen2.5-vl > llava > moondream
-- 평면도 분석: PDF 내 이미지 → 비전 모델로 주택형·방 수·면적 추출
-- 스캔 PDF OCR: 텍스트 추출 실패 시 페이지를 이미지로 변환 → 비전 모델 OCR
-- 비전 모델 미설치 시 이미지 분석만 skip (텍스트 임베딩은 정상 동작)
-
-### 벡터 DB 스키마
-
-- `notices` 테이블: notice_id, source, title, url, content_hash (변경감지), status
-- `chunks` 테이블: notice_id FK, text, section, source_type, page, embedding (BLOB)
-- 섹션 분류: eligibility, income, units, schedule, rent, other, body
-- 소스 유형: pdf, html, supply, vision, title
-- 매트릭스 캐시: 전체 임베딩을 NumPy (N,dim) 배열로 캐시, 단일 matmul로 유사도 계산
 
 ## Work Principles
 

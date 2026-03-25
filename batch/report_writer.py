@@ -19,9 +19,6 @@ DB_PROPERTIES = {
     "LH실패":       {"number": {}},
     "IH실패":       {"number": {}},
     "LH알림":       {"number": {}},
-    "문서처리":     {"number": {}},
-    "청크생성":     {"number": {}},
-    "이미지분석":   {"number": {}},
     "상태":         {"select": {}},
 }
 
@@ -91,7 +88,6 @@ def write_report(
     lh_ok: bool,
     ih_ok: bool,
     lh_notified: int = 0,
-    doc_stats: dict | None = None,
 ):
     """배치 실행 리포트 1건을 Notion DB에 생성합니다."""
     db_id = get_or_create_database(
@@ -119,9 +115,6 @@ def write_report(
         "LH실패":     {"number": lh.get("failed", 0)},
         "IH실패":     {"number": ih.get("failed", 0)},
         "LH알림":     {"number": lh_notified},
-        "문서처리":   {"number": (doc_stats or {}).get("processed", 0)},
-        "청크생성":   {"number": (doc_stats or {}).get("chunks", 0)},
-        "이미지분석": {"number": (doc_stats or {}).get("images_analyzed", 0)},
         "상태":       select(status),
     }
 

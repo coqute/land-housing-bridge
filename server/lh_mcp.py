@@ -7,8 +7,8 @@ import logging
 from datetime import datetime, timedelta
 
 from fastmcp import FastMCP
-from config import validate_env
-from lh_api import fetch_lh_notices, fetch_supply_detail
+from config import validate_env, LH_TP_CODES
+from lh_api import fetch_lh_notices, fetch_supply_detail, dedup_by_pan_id
 from ih_api import fetch_all_ih_notices
 
 validate_env(["OPEN_API_KEY"])
@@ -27,38 +27,73 @@ def _date_range(days: int) -> tuple[str, str]:
     return (today - timedelta(days=days)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
-async def _gather_lh_notices(days: int, **kwargs) -> list[dict]:
+async def _gather_lh_notices(days: int, tp_codes: list[str] | None = None, **kwargs) -> list[dict]:
     """활성 + 과거 LH 공고를 PAN_ID 중복 제거하여 병합 반환.
 
     LH API는 날짜 파라미터가 있으면 활성 공고(공고중/접수중)가 제외되므로,
     활성(lookback_days=0)과 과거(lookback_days=days) 2회 조회 후 병합한다.
+    tp_codes가 주어지면 각 tp_code별로 조회 후 병합.
     하나라도 성공하면 결과 반환, 모두 실패하면 첫 예외를 raise.
     """
     # status/lookback_days는 내부에서 제어 — kwargs 충돌 방지
     kwargs.pop("status", None)
     kwargs.pop("lookback_days", None)
 
-    tasks = [fetch_lh_notices(status="", lookback_days=0, **kwargs)]
-    if days > 0:
-        tasks.append(fetch_lh_notices(status="", lookback_days=days, **kwargs))
+    if tp_codes is not None:
+        codes = tp_codes
+        kwargs.pop("tp_code", None)
+    else:
+        codes = [kwargs.pop("tp_code")] if "tp_code" in kwargs else [None]
+
+    tasks = []
+    for code in codes:
+        kw = {**kwargs}
+        if code is not None:
+            kw["tp_code"] = code
+        tasks.append(fetch_lh_notices(status="", lookback_days=0, **kw))
+        if days > 0:
+            tasks.append(fetch_lh_notices(status="", lookback_days=days, **kw))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    seen: dict[str, dict] = {}
+    valid = []
     first_error = None
     for r in results:
         if isinstance(r, Exception):
             first_error = first_error or r
-            continue
-        for n in r:
-            pid = n.get("PAN_ID", "")
-            if pid and pid not in seen:
-                seen[pid] = n
+        else:
+            valid.append(r)
 
-    if not seen and first_error:
+    merged = dedup_by_pan_id(*valid)
+
+    if not merged and first_error:
         raise first_error
 
-    return list(seen.values())
+    return merged
+
+
+async def _gather_all_lh_notices(days: int, tp_codes: list[str], **kwargs) -> list[dict]:
+    """인천 지역(CNP_CD=28) + 전국(CNP_CD 없음) LH 공고를 병합 반환."""
+    regional = _gather_lh_notices(days, tp_codes=tp_codes, cnp_code="28", **kwargs)
+    nationwide = _gather_lh_notices(days, tp_codes=tp_codes, cnp_code="", **kwargs)
+
+    results = await asyncio.gather(regional, nationwide, return_exceptions=True)
+
+    valid = []
+    first_error = None
+    for r in results:
+        if isinstance(r, Exception):
+            first_error = first_error or r
+        else:
+            valid.append(r)
+
+    # 인천 조회 우선 (dedup에서 먼저 나온 항목 우선)
+    merged = dedup_by_pan_id(*valid)
+
+    if not merged and first_error:
+        raise first_error
+
+    return merged
 
 
 def _format_lh_notice_header(notice: dict) -> list[str]:
@@ -233,18 +268,17 @@ async def get_ih_notices(
 @mcp.tool()
 async def get_notice_summary(
     days: int = 30,
-    tp_code: str = "13",
 ) -> str:
     """
     최근 N일간 LH + IH 공고 현황 요약을 반환합니다.
+    LH는 매입/전세임대 + 임대주택(행복주택, 국민임대) 전체, 인천 + 전국 공고를 포함합니다.
 
     Args:
         days: 조회 기간 (기본값 30일)
-        tp_code: LH 공고유형코드 (기본값 13 매입/전세임대)
     """
     start_date, end_date = _date_range(days)
 
-    lh_task = _gather_lh_notices(days, tp_code=tp_code)
+    lh_task = _gather_all_lh_notices(days, LH_TP_CODES)
     ih_task = fetch_all_ih_notices(startCrtrYmd=start_date, endCrtrYmd=end_date)
 
     results = await asyncio.gather(lh_task, ih_task, return_exceptions=True)
@@ -293,7 +327,6 @@ async def search_all_notices(
     keyword: str,
     days: int = 365,
     category: str = "",
-    semantic: bool = False,
 ) -> str:
     """
     LH + IH 통합 키워드 검색을 수행합니다.
@@ -302,7 +335,6 @@ async def search_all_notices(
         keyword: 검색 키워드 (필수)
         days: 조회 기간 (기본값 365일)
         category: IH 공고 구분 필터 (분양/임대, 빈문자열이면 전체)
-        semantic: True이면 의미 기반 검색 결과를 병합합니다 (Ollama 필요)
     """
     if not keyword or not keyword.strip():
         return "오류: 검색 키워드를 입력해주세요."
@@ -310,7 +342,7 @@ async def search_all_notices(
     keyword = keyword.strip()
     start_date, end_date = _date_range(days)
 
-    lh_task = _gather_lh_notices(days, keyword=keyword)
+    lh_task = _gather_all_lh_notices(days, LH_TP_CODES, keyword=keyword)
     ih_task = fetch_all_ih_notices(
         startCrtrYmd=start_date, endCrtrYmd=end_date, sj=keyword, seNm=category,
     )
@@ -347,51 +379,22 @@ async def search_all_notices(
             lines.append(f"  - 유형: {ty} | 날짜: {date} | 링크: {link}")
         lines.append("")
 
-    # 시맨틱 검색 병합 (옵션)
-    if semantic:
-        try:
-            from ollama_client import check_ollama, embed_texts
-            from vector_store import search as vs_search
-
-            if await check_ollama():
-                emb = await embed_texts([keyword])
-                if emb:
-                    sem_results = vs_search(emb[0], top_k=10, min_score=0.3)
-                    if sem_results:
-                        lines.append(f"\n### 의미 검색 추가 결과 ({len(sem_results)}건)")
-                        seen_ids = set()
-                        for r in sem_results:
-                            nid = r["notice_id"]
-                            if nid in seen_ids:
-                                continue
-                            seen_ids.add(nid)
-                            src = r["source"].upper()
-                            lines.append(f"- [{src}] [{r['section']}] {r['title']} (유사도: {r['score']:.2f})")
-                            text_preview = r["text"][:200].replace("\n", " ")
-                            lines.append(f"  - {text_preview}")
-                        lines.append("")
-            else:
-                lines.append("\n*의미 검색: Ollama 미연결*")
-        except Exception as e:
-            lines.append(f"\n*의미 검색 오류: {e}*")
-
     return "\n".join(lines)
 
 
 @mcp.tool()
 async def get_upcoming_deadlines(
     days: int = 7,
-    tp_code: str = "13",
 ) -> str:
     """
     마감 임박 LH 공고를 D-day 순으로 반환합니다. IH는 마감일 정보가 없어 LH만 대상입니다.
+    매입/전세임대 + 임대주택(행복주택, 국민임대) 전체, 인천 + 전국 공고를 포함합니다.
 
     Args:
         days: 마감까지 남은 일수 (기본값 7일 이내)
-        tp_code: 공고유형코드 (기본값 13 매입/전세임대, 06 임대주택)
     """
     try:
-        notices = await _gather_lh_notices(0, tp_code=tp_code)
+        notices = await _gather_all_lh_notices(0, LH_TP_CODES)
     except Exception as e:
         return f"오류: {e}"
 
@@ -462,339 +465,6 @@ async def get_supply_detail(
 
     lines = [f"## 공급정보 상세 (PAN_ID: {pan_id}, {len(supply_details)}건)\n"]
     lines.extend(_format_supply_rows(supply_columns, supply_details))
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# AI 도구 (Ollama 의존 — 미연결 시 안내 메시지 반환)
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-async def semantic_search(
-    query: str,
-    top_k: int = 10,
-    section: str = "",
-    source: str = "",
-) -> str:
-    """
-    공고 전체 내용(PDF, 자격요건, 공급정보)에서 자연어 의미 기반 검색합니다.
-    키워드 매칭이 아닌 의미적 유사도로 검색하므로 자연어로 검색할 수 있습니다.
-    Ollama + qwen3-embedding이 실행 중이어야 합니다.
-
-    Args:
-        query: 자연어 검색 쿼리 (필수, 예: "신혼부부 소득기준", "전용 59제곱미터 매입임대")
-        top_k: 반환할 결과 수 (기본값 10)
-        section: 섹션 필터 (eligibility/income/units/schedule/rent/other, 빈문자열이면 전체)
-        source: 소스 필터 (lh/ih, 빈문자열이면 전체)
-    """
-    if not query or not query.strip():
-        return "오류: 검색 쿼리를 입력해주세요."
-
-    try:
-        from ollama_client import check_ollama, embed_texts
-        from vector_store import search as vs_search, get_stats
-    except ImportError as e:
-        return f"오류: 필요 모듈 없음 — {e}"
-
-    if not await check_ollama():
-        return (
-            "Ollama 미연결 — 의미 검색을 사용할 수 없습니다.\n"
-            f"대안: search_all_notices(keyword='{query}')로 키워드 검색을 사용하세요."
-        )
-
-    stats = get_stats()
-    if stats["embedded_chunks"] == 0:
-        return "벡터 DB가 비어 있습니다. 배치(py -m batch.main)를 먼저 실행하세요."
-
-    emb = await embed_texts([query.strip()])
-    if not emb:
-        return "임베딩 생성 실패"
-
-    results = vs_search(
-        emb[0], top_k=top_k,
-        section=section or None,
-        source=source or None,
-        min_score=0.2,
-    )
-
-    if not results:
-        return f"'{query}'와 유사한 공고를 찾을 수 없습니다."
-
-    # 결과를 notice_id별 그룹핑
-    grouped: dict[str, list[dict]] = {}
-    for r in results:
-        grouped.setdefault(r["notice_id"], []).append(r)
-
-    lines = [f"## 의미 검색 결과 ({len(grouped)}건 공고, {len(results)}건 매칭) — \"{query}\"\n"]
-
-    for nid, chunks in grouped.items():
-        best = chunks[0]
-        src = best["source"].upper()
-        lines.append(f"### [{src}] {best['title']} (유사도: {best['score']:.2f})")
-        if best.get("url"):
-            lines.append(f"  - 링크: {best['url']}")
-        for c in chunks[:3]:
-            section_label = c["section"]
-            src_type = c["source_type"]
-            text_preview = c["text"][:300].replace("\n", " ")
-            lines.append(f"  - [{section_label}/{src_type}] {text_preview}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def analyze_notice(
-    notice_id: str = "",
-    url: str = "",
-    source: str = "lh",
-) -> str:
-    """
-    특정 공고를 심층 분석합니다. PDF에서 자격요건, 소득기준, 공급세대 정보를 추출합니다.
-    이미 분석된 공고는 즉시 반환, 미분석 공고는 실시간 처리합니다.
-
-    Args:
-        notice_id: LH 공고 PAN_ID (source=lh일 때)
-        url: IH 공고 URL (source=ih일 때, notice_id 대신 사용 가능)
-        source: 공고 소스 (lh 또는 ih, 기본값 lh)
-    """
-    if not notice_id and not url:
-        return "오류: notice_id 또는 url을 입력해주세요."
-
-    try:
-        from vector_store import get_notice_chunks, get_notice_info
-    except ImportError as e:
-        return f"오류: 필요 모듈 없음 — {e}"
-
-    # IH URL → notice_id 변환
-    if url and not notice_id:
-        import hashlib
-        from ih_api import normalize_link
-        notice_id = hashlib.sha256(normalize_link(url).encode()).hexdigest()[:16]
-
-    # 기존 청크 확인
-    chunks = get_notice_chunks(notice_id)
-
-    if not chunks:
-        # on-demand 처리 시도
-        try:
-            from ollama_client import check_ollama
-            if not await check_ollama():
-                return "Ollama 미연결 — 공고 분석을 위해 Ollama가 필요합니다."
-
-            return await _on_demand_analyze(notice_id, source, url)
-        except Exception as e:
-            return f"실시간 분석 실패: {e}"
-
-    # 섹션별 정리
-    notice_info = get_notice_info(notice_id)
-    title = notice_info["title"] if notice_info else notice_id
-    src = (notice_info["source"] if notice_info else source).upper()
-
-    lines = [f"## 공고 심층 분석: [{src}] {title}\n"]
-
-    section_labels = {
-        "eligibility": "자격요건",
-        "income": "소득기준",
-        "units": "공급세대",
-        "schedule": "일정",
-        "rent": "임대조건",
-        "body": "본문",
-        "other": "기타",
-    }
-
-    sections_found: dict[str, list[dict]] = {}
-    for c in chunks:
-        sections_found.setdefault(c["section"], []).append(c)
-
-    for section_key, label in section_labels.items():
-        if section_key in sections_found:
-            lines.append(f"### {label}")
-            for c in sections_found[section_key]:
-                src_type = c["source_type"]
-                page_info = f" (p{c['page']})" if c.get("page") else ""
-                lines.append(f"*[{src_type}{page_info}]*")
-                lines.append(c["text"][:800])
-                lines.append("")
-
-    source_types = set(c["source_type"] for c in chunks)
-    lines.append(f"*분석 소스: {', '.join(source_types)} — {len(chunks)}개 청크*")
-
-    return "\n".join(lines)
-
-
-async def _on_demand_analyze(notice_id: str, source: str, url: str) -> str:
-    """미분석 공고를 실시간으로 처리."""
-    from batch.doc_pipeline import _process_lh_notice, _process_ih_notice
-    from ollama_client import is_vision_available
-    from vector_store import get_notice_chunks
-
-    vision_ok = await is_vision_available()
-
-    if source == "lh":
-        # LH API에서 공고 다시 조회
-        try:
-            notices = await fetch_lh_notices(status="", lookback_days=365)
-            target = next((n for n in notices if n.get("PAN_ID") == notice_id), None)
-            if not target:
-                return f"LH 공고 ID {notice_id}를 찾을 수 없습니다."
-            await _process_lh_notice(target, vision_ok)
-        except Exception as e:
-            return f"LH 공고 처리 실패: {e}"
-    else:
-        if url:
-            notice = {"link": url, "sj": "", "seNm": "", "tyNm": "", "crtYmd": ""}
-            await _process_ih_notice(notice, vision_ok)
-        else:
-            return "IH 공고 분석에는 url이 필요합니다."
-
-    chunks = get_notice_chunks(notice_id)
-    if chunks:
-        return await analyze_notice(notice_id=notice_id, source=source)
-    return "공고 분석 데이터를 생성할 수 없습니다."
-
-
-@mcp.tool()
-async def match_eligibility(
-    conditions: str,
-    top_k: int = 5,
-) -> str:
-    """
-    사용자 조건에 맞는 공고를 찾습니다. 자격요건과 소득기준 섹션에서 의미 매칭합니다.
-
-    Args:
-        conditions: 사용자 조건 (자연어, 예: "신혼부부, 연소득 5천만원, 인천 거주 3년")
-        top_k: 반환할 공고 수 (기본값 5)
-    """
-    if not conditions or not conditions.strip():
-        return "오류: 조건을 입력해주세요."
-
-    try:
-        from ollama_client import check_ollama, embed_texts
-        from vector_store import search as vs_search
-    except ImportError as e:
-        return f"오류: 필요 모듈 없음 — {e}"
-
-    if not await check_ollama():
-        return "Ollama 미연결 — 자격 매칭을 사용할 수 없습니다."
-
-    emb = await embed_texts([conditions.strip()])
-    if not emb:
-        return "임베딩 생성 실패"
-
-    # 자격요건 + 소득기준 섹션에서 검색
-    eligibility_results = vs_search(emb[0], top_k=top_k * 5, section="eligibility", min_score=0.2)
-    income_results = vs_search(emb[0], top_k=top_k * 5, section="income", min_score=0.2)
-
-    # notice_id별 그룹핑 + 평균 점수
-    groups: dict[str, dict] = {}
-    for r in eligibility_results + income_results:
-        nid = r["notice_id"]
-        if nid not in groups:
-            groups[nid] = {
-                "notice_id": nid,
-                "title": r["title"],
-                "source": r["source"],
-                "url": r["url"],
-                "scores": [],
-                "chunks": [],
-            }
-        groups[nid]["scores"].append(r["score"])
-        if len(groups[nid]["chunks"]) < 3:
-            groups[nid]["chunks"].append(r)
-
-    if not groups:
-        return f"'{conditions}'에 매칭되는 공고를 찾을 수 없습니다."
-
-    # 평균 점수 정렬
-    ranked = sorted(groups.values(), key=lambda g: sum(g["scores"]) / len(g["scores"]), reverse=True)[:top_k]
-
-    lines = [f"## 자격 매칭 결과 ({len(ranked)}건) — \"{conditions}\"\n"]
-
-    for g in ranked:
-        avg = sum(g["scores"]) / len(g["scores"])
-        src = g["source"].upper()
-        lines.append(f"### [{src}] {g['title']} (적합도: {avg:.2f})")
-        if g.get("url"):
-            lines.append(f"  - 링크: {g['url']}")
-        for c in g["chunks"]:
-            text_preview = c["text"][:300].replace("\n", " ")
-            lines.append(f"  - [{c['section']}] {text_preview}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def find_similar_notices(
-    notice_id: str,
-    source: str = "lh",
-    top_k: int = 5,
-) -> str:
-    """
-    특정 공고와 유사한 다른 공고를 찾습니다.
-
-    Args:
-        notice_id: 기준 공고 ID (LH: PAN_ID, IH: 공고 링크 해시)
-        source: 기준 공고 소스 (lh/ih, 기본값 lh)
-        top_k: 반환할 유사 공고 수 (기본값 5)
-    """
-    try:
-        from vector_store import get_notice_embedding, search_by_notice, get_notice_info
-    except ImportError as e:
-        return f"오류: 필요 모듈 없음 — {e}"
-
-    # 기준 공고 임베딩 가져오기
-    avg_emb = get_notice_embedding(notice_id)
-
-    if avg_emb is None:
-        # on-demand 임베딩 시도
-        try:
-            from ollama_client import check_ollama, embed_texts
-            from text_chunker import compose_lh_text, compose_ih_text
-
-            if not await check_ollama():
-                return "Ollama 미연결 — 공고 임베딩이 필요합니다."
-
-            # API에서 공고 조회 → 텍스트 조합 → 임베딩
-            if source == "lh":
-                notices = await fetch_lh_notices(status="", lookback_days=365)
-                target = next((n for n in notices if n.get("PAN_ID") == notice_id), None)
-                if not target:
-                    return f"공고 ID {notice_id}를 찾을 수 없습니다."
-                text = compose_lh_text(target)
-            else:
-                return "IH 유사 공고 검색에는 사전 임베딩이 필요합니다 (배치 실행 후 사용)."
-
-            emb = await embed_texts([text])
-            if not emb:
-                return "임베딩 생성 실패"
-            avg_emb = emb[0]
-        except Exception as e:
-            return f"임베딩 생성 실패: {e}"
-
-    # 유사 공고 검색
-    results = search_by_notice(avg_emb, top_k=top_k, exclude_notice_ids={notice_id})
-
-    if not results:
-        return "유사한 공고를 찾을 수 없습니다."
-
-    # 기준 공고 정보
-    base_info = get_notice_info(notice_id)
-    base_title = base_info["title"] if base_info else notice_id
-
-    lines = [f"## '{base_title}' 유사 공고 ({len(results)}건)\n"]
-
-    for r in results:
-        src = r["source"].upper()
-        lines.append(f"### [{src}] {r['title']} (유사도: {r['avg_score']:.2f})")
-        if r.get("url"):
-            lines.append(f"  - 링크: {r['url']}")
-        for c in r.get("top_chunks", [])[:2]:
-            text_preview = c["text"][:200].replace("\n", " ")
-            lines.append(f"  - [{c['section']}] {text_preview}")
-        lines.append("")
 
     return "\n".join(lines)
 

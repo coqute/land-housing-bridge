@@ -8,10 +8,8 @@ OPEN_API_KEY = os.getenv("OPEN_API_KEY")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_PARENT_PAGE_ID = os.getenv("NOTION_PARENT_PAGE_ID")
 
-# Ollama AI (optional — 미설정 시 기본값 사용, validate_env 대상 아님)
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:4b")
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "")
+# LH 공고유형코드 — 배치·MCP 공유
+LH_TP_CODES = ["13", "06"]  # 매입/전세임대 + 임대주택(행복주택, 국민임대 등)
 
 
 def validate_env(required: list[str]) -> None:

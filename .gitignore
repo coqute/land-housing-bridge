@@ -20,11 +20,11 @@ ih_fetch_test.json
 # Generated at runtime by setup_scheduler.py
 batch/run.bat
 
-# Runtime data (vector DB, cached docs)
-data/
-
 # Claude Code
 .claude/
+
+# Data artifacts
+data/*.db
 
 # IDE
 .idea/

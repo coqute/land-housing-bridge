@@ -5,13 +5,14 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-from config import validate_env
-from lh_api import fetch_lh_notices
+from config import validate_env, LH_TP_CODES
+from lh_api import fetch_lh_notices, dedup_by_pan_id
 from .notion_writer import upsert_all as lh_upsert_all
 from ih_api import fetch_all_ih_notices
 from .ih_notion_writer import upsert_all as ih_upsert_all
 from .report_writer import write_report
 from .notify_upcoming import send_deadline_notifications
+from doc_processor import scrape_lh_detail, scrape_ih_detail, create_scrape_client
 
 # ---------------------------------------------------------------------------
 # 로깅 설정 (콘솔 + 파일 동시 출력)
@@ -29,9 +30,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-LH_TP_CODES = ["13", "06"]  # 매입/전세임대 + 임대주택(행복주택, 국민임대 등)
+IH_LOOKBACK_DAYS = 90
 
 _NOISE_KEYWORDS = ("마감", "취소", "결과", "계약", "입주안내", "변경", "정정")
+_SCRAPE_DELAY = 1.0  # 정부 사이트 rate limit 예의
+_SCRAPE_CONCURRENCY = 3  # 스크래핑 동시 요청 수 (LH/IH 각각)
 
 
 def _is_recruitment_notice(notice: dict) -> bool:
@@ -50,59 +53,97 @@ def _is_recruitment_notice(notice: dict) -> bool:
     )
 
 
+async def _scrape_pdf_urls(notices: list[dict], source: str) -> None:
+    """공고 목록의 상세 페이지를 스크래핑하여 PDF URL을 notice dict에 추가.
+
+    best-effort: 스크래핑 실패 시 빈 리스트 설정, 배치 진행에 영향 없음.
+    Semaphore로 동시 요청 수를 제한하여 정부 사이트 rate limit 준수.
+    """
+    sem = asyncio.Semaphore(_SCRAPE_CONCURRENCY)
+
+    async def _scrape_one(notice, client):
+        url = notice.get("DTL_URL", "") if source == "lh" else notice.get("link", "")
+        if not url:
+            notice["_pdf_urls"] = []
+            return
+        async with sem:
+            try:
+                scraper = scrape_lh_detail if source == "lh" else scrape_ih_detail
+                detail = await scraper(url, client)
+                notice["_pdf_urls"] = detail.get("files", [])
+                await asyncio.sleep(_SCRAPE_DELAY)
+            except Exception as e:
+                logger.warning(f"첨부파일 스크래핑 실패 ({source}): {e}")
+                notice["_pdf_urls"] = []
+
+    async with create_scrape_client() as client:
+        await asyncio.gather(*[_scrape_one(n, client) for n in notices])
+
+    scraped = sum(1 for n in notices if n.get("_pdf_urls"))
+    logger.info(f"{source.upper()} 첨부파일 스크래핑: {scraped}/{len(notices)}건 성공")
+
+
 async def run_lh_batch():
     """LH 공고 배치: 매입임대 + 임대주택 → Notion DB upsert
 
     Returns:
-        tuple[bool, dict | None, list[dict]]: (성공여부, upsert 결과, raw notices)
+        tuple[bool, dict | None]: (성공여부, upsert 결과)
     """
     logger.info("-" * 40)
     logger.info("LH 배치 시작")
 
     try:
-        results = await asyncio.gather(
-            *(fetch_lh_notices(tp_code=tp) for tp in LH_TP_CODES)
-        )
+        # 인천 지역(CNP_CD=28) + 전국(CNP_CD 없음) 이중 조회
+        regional = [fetch_lh_notices(tp_code=tp, status="", cnp_code="28") for tp in LH_TP_CODES]
+        national = [fetch_lh_notices(tp_code=tp, status="", cnp_code="") for tp in LH_TP_CODES]
+
+        all_results = await asyncio.gather(*(regional + national), return_exceptions=True)
+
+        valid = []
+        for r in all_results:
+            if isinstance(r, Exception):
+                logger.warning(f"LH API 조회 일부 실패: {r}")
+            else:
+                valid.append(r)
+
+        if not valid:
+            logger.error("LH API 조회 전체 실패")
+            return False, None
+
+        notices = dedup_by_pan_id(*valid)
     except Exception as e:
         logger.error(f"LH API 조회 실패: {e}")
-        return False, None, []
+        return False, None
 
-    # PAN_ID 기준 중복 제거 병합
-    seen: dict[str, dict] = {}
-    for batch in results:
-        for n in batch:
-            pid = n.get("PAN_ID", "")
-            if pid and pid not in seen:
-                seen[pid] = n
-    notices = list(seen.values())
-
-    logger.info(f"LH 조회 결과: {len(notices)}건 (tp_code={','.join(LH_TP_CODES)})")
+    logger.info(f"LH 조회 결과: {len(notices)}건 (tp_code={','.join(LH_TP_CODES)}, 인천+전국)")
 
     if not notices:
         logger.info("LH 해당 공고 없음.")
-        return True, {"new": 0, "updated": 0, "closed": 0, "failed": 0, "new_notices": [], "failed_notices": []}, []
+        return True, {"new": 0, "updated": 0, "closed": 0, "failed": 0, "new_notices": [], "failed_notices": []}
+
+    await _scrape_pdf_urls(notices, "lh")
 
     try:
         result = lh_upsert_all(notices)
     except Exception as e:
         logger.error(f"LH Notion 저장 중 오류: {e}")
-        return False, None, notices
+        return False, None
 
     logger.info("LH 배치 완료")
-    return True, result, notices
+    return True, result
 
 
 async def run_ih_batch():
     """IH 공고 배치: 최근 90일 입주자 모집 공고 → Notion DB upsert
 
     Returns:
-        tuple[bool, dict | None, list[dict]]: (성공여부, upsert 결과, raw notices)
+        tuple[bool, dict | None]: (성공여부, upsert 결과)
     """
     logger.info("-" * 40)
     logger.info("IH 배치 시작")
 
     today = datetime.now()
-    start_date = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+    start_date = (today - timedelta(days=IH_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     end_date = today.strftime("%Y-%m-%d")
 
     try:
@@ -114,21 +155,23 @@ async def run_ih_batch():
         )
     except Exception as e:
         logger.error(f"IH API 조회 실패: {e}")
-        return False, None, []
+        return False, None
 
     # 입주자 모집 공고만 필터 (마감안내, 모집결과, 취소 등 노이즈 제외)
     raw_count = len(notices)
     notices = [n for n in notices if _is_recruitment_notice(n)]
     logger.info(f"IH 조회 결과: {raw_count}건 → 모집공고 필터 후 {len(notices)}건")
 
+    await _scrape_pdf_urls(notices, "ih")
+
     try:
         result = ih_upsert_all(notices)
     except Exception as e:
         logger.error(f"IH Notion 저장 중 오류: {e}")
-        return False, None, notices
+        return False, None
 
     logger.info("IH 배치 완료")
-    return True, result, notices
+    return True, result
 
 
 async def main():
@@ -138,8 +181,14 @@ async def main():
     logger.info("인천 임대주택 공고 배치 시작 (LH + IH)")
     start_time = time.time()
 
-    lh_ok, lh_result, lh_notices_raw = await run_lh_batch()
-    ih_ok, ih_result, ih_notices_raw = await run_ih_batch()
+    try:
+        (lh_ok, lh_result), (ih_ok, ih_result) = await asyncio.gather(
+            run_lh_batch(), run_ih_batch()
+        )
+    except Exception as e:
+        logger.error(f"배치 실행 중 예상치 못한 오류: {e}")
+        lh_ok, lh_result = False, None
+        ih_ok, ih_result = False, None
 
     # 알림 단계 (LH만 — IH는 마감일 없음)
     lh_notified = 0
@@ -151,19 +200,11 @@ async def main():
         except Exception as e:
             logger.error(f"LH 마감 알림 처리 실패: {e}")
 
-    # 문서 처리 + 임베딩 단계 (Ollama 의존 — 실패해도 core 무관)
-    doc_stats = None
-    try:
-        from .doc_pipeline import process_notices
-        doc_stats = await process_notices(lh_notices_raw, ih_notices_raw)
-    except Exception as e:
-        logger.warning(f"문서 처리 단계 실패 (core 배치 영향 없음): {e}")
-
     elapsed = time.time() - start_time
 
     try:
         write_report(lh_result, ih_result, elapsed, lh_ok, ih_ok,
-                      lh_notified=lh_notified, doc_stats=doc_stats)
+                      lh_notified=lh_notified)
     except Exception as e:
         logger.error(f"배치 리포트 생성 실패: {e}")
 

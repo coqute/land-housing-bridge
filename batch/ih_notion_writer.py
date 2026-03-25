@@ -29,6 +29,7 @@ DB_PROPERTIES = {
     "수집일시": {"date": {}},
     "접수마감일": {"date": {}},
     "알림완료":  {"checkbox": {}},
+    "첨부파일":  {"files": {}},
 }
 
 
@@ -46,6 +47,12 @@ def _build_properties(notice: dict, collected_at: str) -> dict:
         "수집일시": {"date": {"start": collected_at}},
         "접수마감일": {"date": None},
         "알림완료": {"checkbox": False},
+        "첨부파일": {"files": [
+            {"type": "external", "name": f.get("name", "file"),
+             "external": {"url": f["url"]}}
+            for f in notice.get("_pdf_urls", [])
+            if isinstance(f, dict) and f.get("url")
+        ]},
     }
 
 

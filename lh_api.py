@@ -15,6 +15,18 @@ _SUPPLY_SEMAPHORE = asyncio.Semaphore(5)
 logger = logging.getLogger(__name__)
 
 
+def dedup_by_pan_id(*notice_lists: list[dict]) -> list[dict]:
+    """PAN_ID 기준 중복 제거 병합 (먼저 나온 항목 우선)."""
+    seen: dict[str, dict] = {}
+    for notices in notice_lists:
+        for n in notices:
+            pid = n.get("PAN_ID", "")
+            if pid and pid not in seen:
+                seen[pid] = n
+    return list(seen.values())
+
+
+
 def _extract_ds_list(response_data, key: str = 'dsList') -> list:
     """API 응답(list 또는 dict)에서 지정 키의 배열을 안전하게 추출"""
     if isinstance(response_data, list):
@@ -100,8 +112,11 @@ async def fetch_lh_notices(
         "PG_SZ": limit,
         "PAGE": page,
         "UPP_AIS_TP_CD": tp_code,
-        "CNP_CD": cnp_code,
     }
+
+    # cnp_code 비어있으면 CNP_CD 제외 → 전국 조회
+    if cnp_code:
+        notice_params["CNP_CD"] = cnp_code
 
     # status가 비어있으면 PAN_SS 파라미터 제외 (빈 문자열 전달 시 0건 반환되는 API 버그 회피)
     if status:

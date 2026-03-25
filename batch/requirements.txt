@@ -1,6 +1,4 @@
 notion-client>=2.2.1
 httpx>=0.25.0
 python-dotenv>=1.0.0
-numpy>=1.26.0
-pymupdf>=1.25.0
 beautifulsoup4>=4.12.0
