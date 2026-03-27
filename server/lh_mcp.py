@@ -7,8 +7,8 @@ import logging
 from datetime import datetime, timedelta
 
 from fastmcp import FastMCP
-from config import validate_env, LH_TP_CODES
-from lh_api import fetch_lh_notices, fetch_supply_detail, dedup_by_pan_id
+from config import validate_env, LH_TP_CODES, TARGET_REGION, NATIONWIDE_AIS_CODES
+from lh_api import fetch_lh_notices, fetch_supply_detail, dedup_by_pan_id, filter_region_relevant
 from ih_api import fetch_all_ih_notices
 
 validate_env(["OPEN_API_KEY"])
@@ -73,22 +73,33 @@ async def _gather_lh_notices(days: int, tp_codes: list[str] | None = None, **kwa
 
 
 async def _gather_all_lh_notices(days: int, tp_codes: list[str], **kwargs) -> list[dict]:
-    """인천 지역(CNP_CD=28) + 전국(CNP_CD 없음) LH 공고를 병합 반환."""
+    """인천 지역(CNP_CD=28) + 전국 대상 LH 공고를 병합 반환.
+
+    전국 조회 결과는 filter_region_relevant()로 인천 관련 + 전국 대상만 필터.
+    """
     regional = _gather_lh_notices(days, tp_codes=tp_codes, cnp_code="28", **kwargs)
     nationwide = _gather_lh_notices(days, tp_codes=tp_codes, cnp_code="", **kwargs)
 
     results = await asyncio.gather(regional, nationwide, return_exceptions=True)
 
-    valid = []
     first_error = None
-    for r in results:
+    regional_notices = []
+    national_notices = []
+    for i, r in enumerate(results):
         if isinstance(r, Exception):
             first_error = first_error or r
+        elif i == 0:
+            regional_notices = r
         else:
-            valid.append(r)
+            national_notices = r
+
+    # 전국 조회 결과에서 인천 관련 + 전국 대상만 필터
+    national_filtered = filter_region_relevant(
+        national_notices, TARGET_REGION, NATIONWIDE_AIS_CODES,
+    )
 
     # 인천 조회 우선 (dedup에서 먼저 나온 항목 우선)
-    merged = dedup_by_pan_id(*valid)
+    merged = dedup_by_pan_id(regional_notices, national_filtered)
 
     if not merged and first_error:
         raise first_error

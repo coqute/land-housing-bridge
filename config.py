@@ -11,6 +11,12 @@ NOTION_PARENT_PAGE_ID = os.getenv("NOTION_PARENT_PAGE_ID")
 # LH 공고유형코드 — 배치·MCP 공유
 LH_TP_CODES = ["13", "06"]  # 매입/전세임대 + 임대주택(행복주택, 국민임대 등)
 
+# 전국 조회 필터 설정
+TARGET_REGION = "인천"
+# 거주지 기반 전국 대상 유형 (AIS_TP_CD 코드)
+# 17=전세임대: 기존 민간주택에서 전세를 구하는 방식 — 지역 제한 없이 신청 가능
+NATIONWIDE_AIS_CODES = {"17"}
+
 
 def validate_env(required: list[str]) -> None:
     """필수 환경변수를 일괄 검증합니다. 누락 시 EnvironmentError를 raise합니다."""

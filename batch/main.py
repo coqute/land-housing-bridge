@@ -5,8 +5,8 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-from config import validate_env, LH_TP_CODES
-from lh_api import fetch_lh_notices, dedup_by_pan_id
+from config import validate_env, LH_TP_CODES, TARGET_REGION, NATIONWIDE_AIS_CODES
+from lh_api import fetch_lh_notices, dedup_by_pan_id, filter_region_relevant
 from .notion_writer import upsert_all as lh_upsert_all
 from ih_api import fetch_all_ih_notices
 from .ih_notion_writer import upsert_all as ih_upsert_all
@@ -99,23 +99,41 @@ async def run_lh_batch():
 
         all_results = await asyncio.gather(*(regional + national), return_exceptions=True)
 
-        valid = []
-        for r in all_results:
+        regional_valid = []
+        national_valid = []
+        n_regional = len(regional)
+        for i, r in enumerate(all_results):
             if isinstance(r, Exception):
                 logger.warning(f"LH API 조회 일부 실패: {r}")
+            elif i < n_regional:
+                regional_valid.append(r)
             else:
-                valid.append(r)
+                national_valid.append(r)
 
-        if not valid:
+        if not regional_valid and not national_valid:
             logger.error("LH API 조회 전체 실패")
             return False, None
 
-        notices = dedup_by_pan_id(*valid)
+        # 전국 조회 결과에서 인천 관련 + 전국 대상만 필터
+        regional_notices = dedup_by_pan_id(*regional_valid) if regional_valid else []
+        national_notices = dedup_by_pan_id(*national_valid) if national_valid else []
+        national_filtered = filter_region_relevant(
+            national_notices, TARGET_REGION, NATIONWIDE_AIS_CODES,
+        )
+
+        if national_notices:
+            logger.info(
+                f"전국 조회 필터: {len(national_notices)}건 → {len(national_filtered)}건 "
+                f"(인천 관련 + 전국 대상)"
+            )
+
+        # 인천 우선 dedup (인천 조회 결과가 먼저)
+        notices = dedup_by_pan_id(regional_notices, national_filtered)
     except Exception as e:
         logger.error(f"LH API 조회 실패: {e}")
         return False, None
 
-    logger.info(f"LH 조회 결과: {len(notices)}건 (tp_code={','.join(LH_TP_CODES)}, 인천+전국)")
+    logger.info(f"LH 조회 결과: {len(notices)}건 (tp_code={','.join(LH_TP_CODES)}, 인천+전국대상)")
 
     if not notices:
         logger.info("LH 해당 공고 없음.")

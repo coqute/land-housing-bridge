@@ -26,6 +26,26 @@ def dedup_by_pan_id(*notice_lists: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
+def filter_region_relevant(
+    notices: list[dict],
+    region: str,
+    nationwide_codes: set[str],
+) -> list[dict]:
+    """전국 조회 결과에서 대상 지역 관련 공고만 필터.
+
+    판별 기준 (OR):
+    1. CNP_CD_NM에 region 포함 → 해당 지역 공고
+    2. PAN_NM에 region 포함 → 해당 지역 관련
+    3. AIS_TP_CD가 nationwide_codes에 포함 → 전국 대상 제도
+    """
+    return [
+        n for n in notices
+        if region in n.get("CNP_CD_NM", "")
+        or region in n.get("PAN_NM", "")
+        or n.get("AIS_TP_CD", "") in nationwide_codes
+    ]
+
+
 
 def _extract_ds_list(response_data, key: str = 'dsList') -> list:
     """API 응답(list 또는 dict)에서 지정 키의 배열을 안전하게 추출"""
@@ -151,6 +171,7 @@ async def fetch_lh_notices(
             results.append({
                 "PAN_ID": item.get('PAN_ID', ''),
                 "PAN_NM": item.get('PAN_NM', ''),
+                "AIS_TP_CD": item.get('AIS_TP_CD', ''),
                 "AIS_TP_CD_NM": item.get('AIS_TP_CD_NM', ''),
                 "CNP_CD_NM": item.get('CNP_CD_NM', ''),
                 "PAN_SS": item.get('PAN_SS', ''),
