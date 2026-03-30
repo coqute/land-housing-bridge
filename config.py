@@ -17,6 +17,9 @@ TARGET_REGION = "인천"
 # 17=전세임대: 기존 민간주택에서 전세를 구하는 방식 — 지역 제한 없이 신청 가능
 NATIONWIDE_AIS_CODES = {"17"}
 
+# 도서지역 제외 키워드 (PAN_NM 매칭) — 지리적으로 먼 도서지역 공고 필터링
+EXCLUDE_SUBREGIONS = {"옹진", "강화"}
+
 
 def validate_env(required: list[str]) -> None:
     """필수 환경변수를 일괄 검증합니다. 누락 시 EnvironmentError를 raise합니다."""

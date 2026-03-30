@@ -30,6 +30,7 @@ def filter_region_relevant(
     notices: list[dict],
     region: str,
     nationwide_codes: set[str],
+    exclude_keywords: set[str] | None = None,
 ) -> list[dict]:
     """전국 조회 결과에서 대상 지역 관련 공고만 필터.
 
@@ -37,13 +38,29 @@ def filter_region_relevant(
     1. CNP_CD_NM에 region 포함 → 해당 지역 공고
     2. PAN_NM에 region 포함 → 해당 지역 관련
     3. AIS_TP_CD가 nationwide_codes에 포함 → 전국 대상 제도
+
+    exclude_keywords가 주어지면 PAN_NM에 해당 키워드가 포함된 공고를 제외합니다.
+    (예: {"옹진", "강화"} → 도서지역 공고 제외)
     """
-    return [
+    result = [
         n for n in notices
         if region in n.get("CNP_CD_NM", "")
         or region in n.get("PAN_NM", "")
         or n.get("AIS_TP_CD", "") in nationwide_codes
     ]
+    if exclude_keywords:
+        result = [
+            n for n in result
+            if not any(kw in n.get("PAN_NM", "") for kw in exclude_keywords)
+        ]
+    return result
+
+
+def exclude_subregions(notices: list[dict], keywords: set[str]) -> list[dict]:
+    """공고 목록에서 PAN_NM에 제외 키워드가 포함된 공고를 제거합니다."""
+    if not keywords:
+        return notices
+    return [n for n in notices if not any(kw in n.get("PAN_NM", "") for kw in keywords)]
 
 
 

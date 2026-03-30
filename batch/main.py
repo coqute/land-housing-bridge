@@ -6,8 +6,8 @@ import time
 from datetime import datetime, timedelta
 import httpx
 
-from config import validate_env, LH_TP_CODES, TARGET_REGION, NATIONWIDE_AIS_CODES
-from lh_api import fetch_lh_notices, dedup_by_pan_id, filter_region_relevant
+from config import validate_env, LH_TP_CODES, TARGET_REGION, NATIONWIDE_AIS_CODES, EXCLUDE_SUBREGIONS
+from lh_api import fetch_lh_notices, dedup_by_pan_id, filter_region_relevant, exclude_subregions
 from .notion_writer import upsert_all as lh_upsert_all
 from ih_api import fetch_all_ih_notices
 from .ih_notion_writer import upsert_all as ih_upsert_all
@@ -120,6 +120,7 @@ async def run_lh_batch():
         national_notices = dedup_by_pan_id(*national_valid) if national_valid else []
         national_filtered = filter_region_relevant(
             national_notices, TARGET_REGION, NATIONWIDE_AIS_CODES,
+            exclude_keywords=EXCLUDE_SUBREGIONS,
         )
 
         if national_notices:
@@ -128,8 +129,11 @@ async def run_lh_batch():
                 f"(인천 관련 + 전국 대상)"
             )
 
-        # 인천 우선 dedup (인천 조회 결과가 먼저)
-        notices = dedup_by_pan_id(regional_notices, national_filtered)
+        # 인천 우선 dedup + 도서지역 제외 (인천 직접 조회에도 도서지역 포함되므로)
+        notices = exclude_subregions(
+            dedup_by_pan_id(regional_notices, national_filtered),
+            EXCLUDE_SUBREGIONS,
+        )
     except Exception as e:
         logger.error(f"LH API 조회 실패: {e}")
         return False, None

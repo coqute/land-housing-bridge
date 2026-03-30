@@ -7,8 +7,8 @@ import logging
 from datetime import datetime, timedelta
 
 from fastmcp import FastMCP
-from config import validate_env, LH_TP_CODES, TARGET_REGION, NATIONWIDE_AIS_CODES
-from lh_api import fetch_lh_notices, fetch_supply_detail, dedup_by_pan_id, filter_region_relevant
+from config import validate_env, LH_TP_CODES, TARGET_REGION, NATIONWIDE_AIS_CODES, EXCLUDE_SUBREGIONS
+from lh_api import fetch_lh_notices, fetch_supply_detail, dedup_by_pan_id, filter_region_relevant, exclude_subregions
 from ih_api import fetch_all_ih_notices
 
 validate_env(["OPEN_API_KEY"])
@@ -110,10 +110,14 @@ async def _gather_all_lh_notices(days: int, tp_codes: list[str], **kwargs) -> tu
     # 전국 조회 결과에서 인천 관련 + 전국 대상만 필터
     national_filtered = filter_region_relevant(
         national_notices, TARGET_REGION, NATIONWIDE_AIS_CODES,
+        exclude_keywords=EXCLUDE_SUBREGIONS,
     )
 
-    # 인천 조회 우선 (dedup에서 먼저 나온 항목 우선)
-    merged = dedup_by_pan_id(regional_notices, national_filtered)
+    # 인천 조회 우선 (dedup에서 먼저 나온 항목 우선) + 도서지역 제외
+    merged = exclude_subregions(
+        dedup_by_pan_id(regional_notices, national_filtered),
+        EXCLUDE_SUBREGIONS,
+    )
 
     if not merged and first_error:
         raise first_error
