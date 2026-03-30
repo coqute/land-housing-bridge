@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from .notion_base import (
@@ -17,12 +19,11 @@ DB_PROPERTIES = {
     "공고유형":  {"select": {}},
     "지역":      {"select": {}},
     "공고상태":  {"select": {}},
-    "공고기간":  {"rich_text": {}},
+    "공고기간":  {"date": {}},
     "상세URL":   {"url": {}},
     "수집일시":  {"date": {}},
-    "접수마감일": {"date": {}},
-    "알림완료":  {"checkbox": {}},
     "첨부파일":  {"files": {}},
+    "_블록해시": {"rich_text": {}},
 }
 
 
@@ -30,20 +31,23 @@ DB_PROPERTIES = {
 # LH 고유 로직
 # ---------------------------------------------------------------------------
 def _build_properties(notice: dict, collected_at: str) -> dict:
-    period = f"{notice.get('PAN_NT_ST_DT', '')} ~ {notice.get('CLSG_DT', '')}"
-    clsg_dt = notice.get("CLSG_DT", "")
-    deadline = {"date": {"start": clsg_dt.replace(".", "-")}} if clsg_dt else {"date": None}
+    start_dt = notice.get("PAN_NT_ST_DT", "").replace(".", "-") or None
+    end_dt = notice.get("CLSG_DT", "").replace(".", "-") or None
+    if start_dt:
+        period_date = {"date": {"start": start_dt, "end": end_dt}}
+    elif end_dt:
+        period_date = {"date": {"start": end_dt}}
+    else:
+        period_date = {"date": None}
     return {
         "공고명":   {"title": rich_text(notice.get("PAN_NM", ""))},
         "공고ID":   {"rich_text": rich_text(notice.get("PAN_ID", ""))},
         "공고유형": select(notice.get("AIS_TP_CD_NM", "")),
         "지역":     select(notice.get("CNP_CD_NM", "")),
         "공고상태": select(notice.get("PAN_SS", "")),
-        "공고기간": {"rich_text": rich_text(period)},
+        "공고기간": period_date,
         "상세URL":  {"url": notice.get("DTL_URL") or None},
         "수집일시": {"date": {"start": collected_at}},
-        "접수마감일": deadline,
-        "알림완료": {"checkbox": False},
         "첨부파일": {"files": [
             {"type": "external", "name": f.get("name", "file"),
              "external": {"url": f["url"]}}
@@ -103,16 +107,22 @@ def _build_supply_blocks(supply_details: list[dict], supply_columns: dict = None
     return blocks
 
 
-def _replace_page_blocks(page_id: str, new_blocks: list[dict]):
+def _compute_supply_hash(supply_details: list[dict], supply_columns: dict | None) -> str:
+    """공급정보의 해시를 계산하여 변경 감지에 사용."""
+    data = json.dumps({"d": supply_details, "c": supply_columns}, sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(data.encode()).hexdigest()[:16]
+
+
+async def _replace_page_blocks(page_id: str, new_blocks: list[dict]):
     """페이지의 기존 블록 전체 삭제 후 새 블록으로 교체 (페이지네이션 처리)"""
     notion = get_notion_client()
     try:
         cursor = None
         while True:
             kw = {"start_cursor": cursor} if cursor else {}
-            existing = notion.blocks.children.list(block_id=page_id, **kw)
+            existing = await notion.blocks.children.list(block_id=page_id, **kw)
             for block in existing.get("results", []):
-                notion.blocks.delete(block_id=block["id"])
+                await notion.blocks.delete(block_id=block["id"])
             if not existing.get("has_more"):
                 break
             cursor = existing.get("next_cursor")
@@ -120,25 +130,27 @@ def _replace_page_blocks(page_id: str, new_blocks: list[dict]):
         logger.warning(f"기존 블록 삭제 실패 (page_id={page_id}): {e}")
 
     if new_blocks:
-        notion.blocks.children.append(block_id=page_id, children=new_blocks)
+        await notion.blocks.children.append(block_id=page_id, children=new_blocks)
 
 
 # ---------------------------------------------------------------------------
 # 페이지 캐시 빌드
 # ---------------------------------------------------------------------------
-def _get_all_pan_id_page_map(db_id: str) -> dict[str, dict]:
-    """Notion DB의 모든 페이지를 {PAN_ID: {"page_id": ..., "status": ...}} 형태로 반환."""
+async def _get_all_pan_id_page_map(db_id: str) -> dict[str, dict]:
+    """Notion DB의 모든 페이지를 {PAN_ID: {"page_id": ..., "status": ..., "blocks_hash": ...}} 형태로 반환."""
     pages = {}
-    for page in paginate_query(db_id):
-        pan_id_prop = page.get("properties", {}).get("공고ID", {})
-        pan_id_list = pan_id_prop.get("rich_text", [])
-        pan_id = pan_id_list[0]["text"]["content"] if pan_id_list else ""
+    for page in await paginate_query(db_id):
+        props = page.get("properties", {})
+        pan_id_list = props.get("공고ID", {}).get("rich_text", [])
+        pan_id = pan_id_list[0].get("plain_text", "") if pan_id_list else ""
         if pan_id:
-            status_prop = page.get("properties", {}).get("공고상태", {})
-            status = (status_prop.get("select") or {}).get("name", "")
+            status = (props.get("공고상태", {}).get("select") or {}).get("name", "")
+            hash_list = props.get("_블록해시", {}).get("rich_text", [])
+            blocks_hash = hash_list[0].get("plain_text", "") if hash_list else ""
             pages[pan_id] = {
                 "page_id": page["id"],
                 "status": status,
+                "blocks_hash": blocks_hash,
             }
     return pages
 
@@ -146,34 +158,39 @@ def _get_all_pan_id_page_map(db_id: str) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 # Upsert
 # ---------------------------------------------------------------------------
-def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None = None):
+async def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None = None):
     """공고 1건을 Notion DB에 upsert합니다."""
     notion = get_notion_client()
     collected_at = datetime.now(tz=timezone.utc).isoformat()
     properties = _build_properties(notice, collected_at)
-    supply_blocks = _build_supply_blocks(
-        notice.get("supply_details", []),
-        notice.get("supply_columns"),
-    )
+
+    supply_details = notice.get("supply_details", [])
+    supply_columns = notice.get("supply_columns")
+    supply_blocks = _build_supply_blocks(supply_details, supply_columns)
+    new_hash = _compute_supply_hash(supply_details, supply_columns)
+    properties["_블록해시"] = {"rich_text": rich_text(new_hash)}
 
     pan_id = notice["PAN_ID"]
     if page_cache is not None:
         cached = page_cache.get(pan_id)
         existing_page_id = cached["page_id"] if cached else None
     else:
-        result = query_db(db_id, {
+        result = await query_db(db_id, {
             "filter": {"property": "공고ID", "rich_text": {"equals": pan_id}}
         })
         results = result.get("results", [])
         existing_page_id = results[0]["id"] if results else None
+        cached = None
 
     if existing_page_id:
-        notion.pages.update(page_id=existing_page_id, properties=properties)
-        _replace_page_blocks(existing_page_id, supply_blocks)
+        await notion.pages.update(page_id=existing_page_id, properties=properties)
+        cached_hash = (cached or {}).get("blocks_hash", "")
+        if new_hash != cached_hash:
+            await _replace_page_blocks(existing_page_id, supply_blocks)
         logger.info(f"  [업데이트] {notice['PAN_NM']} (PAN_ID={pan_id})")
         return False
     else:
-        notion.pages.create(
+        await notion.pages.create(
             parent={"type": "database_id", "database_id": db_id},
             properties=properties,
             children=supply_blocks,
@@ -182,7 +199,7 @@ def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None =
         return True
 
 
-def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dict[str, dict] | None = None):
+async def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dict[str, dict] | None = None):
     """Notion에서 공고중이지만 현재 API에 없는 공고를 공고마감으로 업데이트."""
     notion = get_notion_client()
     if page_cache is not None:
@@ -194,10 +211,10 @@ def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dic
     else:
         active_in_notion = {}
         body_base = {"filter": {"property": "공고상태", "select": {"equals": "공고중"}}}
-        for page in paginate_query(db_id, body_base):
+        for page in await paginate_query(db_id, body_base):
             pan_id_prop = page.get("properties", {}).get("공고ID", {})
             pan_id_list = pan_id_prop.get("rich_text", [])
-            pan_id = pan_id_list[0]["text"]["content"] if pan_id_list else ""
+            pan_id = pan_id_list[0].get("plain_text", "") if pan_id_list else ""
             if pan_id:
                 active_in_notion[pan_id] = page["id"]
 
@@ -216,7 +233,7 @@ def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dic
     logger.info(f"마감 처리 대상: {len(expired)}건")
     for pan_id, page_id in expired.items():
         try:
-            notion.pages.update(
+            await notion.pages.update(
                 page_id=page_id,
                 properties={"공고상태": select("공고마감")},
             )
@@ -227,17 +244,17 @@ def close_expired_notices(db_id: str, current_pan_ids: set[str], page_cache: dic
     return closed
 
 
-def upsert_all(notices: list[dict]) -> dict:
+async def upsert_all(notices: list[dict]) -> dict:
     """공고 목록 전체를 Notion DB에 upsert하고, 마감된 공고는 상태 업데이트.
 
     Returns:
         dict: {"new": int, "updated": int, "closed": int, "failed": int, "new_notices": list}
     """
-    db_id = get_or_create_database("NOTION_DATABASE_ID", DB_NAME, DB_PROPERTIES)
+    db_id = await get_or_create_database("NOTION_DATABASE_ID", DB_NAME, DB_PROPERTIES)
     current_pan_ids = {n["PAN_ID"] for n in notices}
 
     logger.info("Notion DB 전체 조회 중...")
-    page_cache = _get_all_pan_id_page_map(db_id)
+    page_cache = await _get_all_pan_id_page_map(db_id)
     logger.info(f"기존 등록 공고 수: {len(page_cache)}건")
 
     new, updated, failed = 0, 0, 0
@@ -246,7 +263,7 @@ def upsert_all(notices: list[dict]) -> dict:
 
     for notice in notices:
         try:
-            is_new = upsert_notice(db_id, notice, page_cache=page_cache)
+            is_new = await upsert_notice(db_id, notice, page_cache=page_cache)
             if is_new:
                 new += 1
                 new_notices.append(notice)
@@ -265,10 +282,11 @@ def upsert_all(notices: list[dict]) -> dict:
     if supply_errors:
         logger.warning(f"공급정보 조회 실패: {supply_errors}건")
 
-    closed = close_expired_notices(db_id, current_pan_ids, page_cache=page_cache)
+    closed = await close_expired_notices(db_id, current_pan_ids, page_cache=page_cache)
 
     logger.info(f"Notion 저장 완료 - 신규: {new}, 업데이트: {updated}, 마감: {closed}, 실패: {failed}")
     return {
         "new": new, "updated": updated, "closed": closed, "failed": failed,
+        "supply_errors": supply_errors,
         "new_notices": new_notices, "failed_notices": failed_notices,
     }

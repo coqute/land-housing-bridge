@@ -1,4 +1,5 @@
 """공통 IH(인천도시공사) API 로직 — server/lh_mcp.py 와 batch/ 에서 사용합니다."""
+import asyncio
 import logging
 from urllib.parse import urlparse, urlencode, parse_qs
 import httpx
@@ -104,26 +105,27 @@ async def fetch_all_ih_notices(
     Args:
         tyNm: 유형명 클라이언트 사이드 필터 (예: '일반임대'). API 미지원 → 조회 후 필터링.
     """
-    all_items: list[dict] = []
-    page = 1
+    common_kw = dict(numOfRows=30, startCrtrYmd=startCrtrYmd, endCrtrYmd=endCrtrYmd, sj=sj, seNm=seNm)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        while True:
-            items, total_pages = await fetch_ih_notices(
-                numOfRows=30,
-                pageNo=page,
-                startCrtrYmd=startCrtrYmd,
-                endCrtrYmd=endCrtrYmd,
-                sj=sj,
-                seNm=seNm,
-                client=client,
-            )
-            all_items.extend(items)
-            logger.info(f"IH API 페이지 {page}/{total_pages} 조회: {len(items)}건")
+        # 첫 페이지 조회 → total_pages 확인
+        items_p1, total_pages = await fetch_ih_notices(pageNo=1, client=client, **common_kw)
+        all_items = list(items_p1)
+        logger.info(f"IH API 페이지 1/{total_pages} 조회: {len(items_p1)}건")
 
-            if page >= total_pages or not items:
-                break
-            page += 1
+        # 나머지 페이지 병렬 조회
+        if total_pages > 1 and items_p1:
+            remaining = await asyncio.gather(*[
+                fetch_ih_notices(pageNo=p, client=client, **common_kw)
+                for p in range(2, total_pages + 1)
+            ], return_exceptions=True)
+            for i, r in enumerate(remaining, start=2):
+                if isinstance(r, Exception):
+                    logger.warning(f"IH API 페이지 {i} 조회 실패: {r}")
+                else:
+                    items, _ = r
+                    all_items.extend(items)
+                    logger.info(f"IH API 페이지 {i}/{total_pages} 조회: {len(items)}건")
 
     if tyNm:
         all_items = [item for item in all_items if item.get("tyNm") == tyNm]

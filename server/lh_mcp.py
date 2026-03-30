@@ -27,13 +27,16 @@ def _date_range(days: int) -> tuple[str, str]:
     return (today - timedelta(days=days)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
-async def _gather_lh_notices(days: int, tp_codes: list[str] | None = None, **kwargs) -> list[dict]:
+async def _gather_lh_notices(days: int, tp_codes: list[str] | None = None, **kwargs) -> tuple[list[dict], list[str]]:
     """활성 + 과거 LH 공고를 PAN_ID 중복 제거하여 병합 반환.
 
     LH API는 날짜 파라미터가 있으면 활성 공고(공고중/접수중)가 제외되므로,
     활성(lookback_days=0)과 과거(lookback_days=days) 2회 조회 후 병합한다.
     tp_codes가 주어지면 각 tp_code별로 조회 후 병합.
     하나라도 성공하면 결과 반환, 모두 실패하면 첫 예외를 raise.
+
+    Returns:
+        tuple[list[dict], list[str]]: (공고 목록, 부분 실패 경고 메시지 리스트)
     """
     # status/lookback_days는 내부에서 제어 — kwargs 충돌 방지
     kwargs.pop("status", None)
@@ -57,10 +60,12 @@ async def _gather_lh_notices(days: int, tp_codes: list[str] | None = None, **kwa
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     valid = []
+    warnings = []
     first_error = None
     for r in results:
         if isinstance(r, Exception):
             first_error = first_error or r
+            warnings.append(str(r))
         else:
             valid.append(r)
 
@@ -69,29 +74,38 @@ async def _gather_lh_notices(days: int, tp_codes: list[str] | None = None, **kwa
     if not merged and first_error:
         raise first_error
 
-    return merged
+    return merged, warnings
 
 
-async def _gather_all_lh_notices(days: int, tp_codes: list[str], **kwargs) -> list[dict]:
+async def _gather_all_lh_notices(days: int, tp_codes: list[str], **kwargs) -> tuple[list[dict], list[str]]:
     """인천 지역(CNP_CD=28) + 전국 대상 LH 공고를 병합 반환.
 
     전국 조회 결과는 filter_region_relevant()로 인천 관련 + 전국 대상만 필터.
+
+    Returns:
+        tuple[list[dict], list[str]]: (공고 목록, 부분 실패 경고 메시지 리스트)
     """
     regional = _gather_lh_notices(days, tp_codes=tp_codes, cnp_code="28", **kwargs)
     nationwide = _gather_lh_notices(days, tp_codes=tp_codes, cnp_code="", **kwargs)
 
     results = await asyncio.gather(regional, nationwide, return_exceptions=True)
 
+    warnings = []
     first_error = None
     regional_notices = []
     national_notices = []
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             first_error = first_error or r
-        elif i == 0:
-            regional_notices = r
+            label = "인천" if i == 0 else "전국"
+            warnings.append(f"{label} 조회 실패: {r}")
         else:
-            national_notices = r
+            notices, sub_warnings = r
+            warnings.extend(sub_warnings)
+            if i == 0:
+                regional_notices = notices
+            else:
+                national_notices = notices
 
     # 전국 조회 결과에서 인천 관련 + 전국 대상만 필터
     national_filtered = filter_region_relevant(
@@ -104,7 +118,7 @@ async def _gather_all_lh_notices(days: int, tp_codes: list[str], **kwargs) -> li
     if not merged and first_error:
         raise first_error
 
-    return merged
+    return merged, warnings
 
 
 def _format_lh_notice_header(notice: dict) -> list[str]:
@@ -294,12 +308,13 @@ async def get_notice_summary(
 
     results = await asyncio.gather(lh_task, ih_task, return_exceptions=True)
     lines = [f"## 최근 {days}일 공고 현황\n"]
+    lh_warnings = []
 
     # LH
     if isinstance(results[0], Exception):
         lines.append(f"### LH 공고\n- 조회 실패: {results[0]}\n")
     else:
-        lh_notices = results[0]
+        lh_notices, lh_warnings = results[0]
         status_count: dict[str, int] = {}
         for n in lh_notices:
             s = n.get("PAN_SS", "기타")
@@ -329,6 +344,9 @@ async def get_notice_summary(
         for t, c in ty_count.items():
             lines.append(f"- {t}: {c}건")
         lines.append("")
+
+    if lh_warnings:
+        lines.append(f"---\n⚠ LH 일부 조회 실패: {'; '.join(lh_warnings)}")
 
     return "\n".join(lines)
 
@@ -360,12 +378,13 @@ async def search_all_notices(
 
     results = await asyncio.gather(lh_task, ih_task, return_exceptions=True)
     lines = [f"## '{keyword}' 통합 검색 결과\n"]
+    lh_warnings = []
 
     # LH
     if isinstance(results[0], Exception):
         lines.append(f"### LH\n- 조회 실패: {results[0]}\n")
     else:
-        lh_notices = results[0]
+        lh_notices, lh_warnings = results[0]
         lines.append(f"### LH ({len(lh_notices)}건)")
         for n in lh_notices:
             header = _format_lh_notice_header(n)
@@ -390,6 +409,9 @@ async def search_all_notices(
             lines.append(f"  - 유형: {ty} | 날짜: {date} | 링크: {link}")
         lines.append("")
 
+    if lh_warnings:
+        lines.append(f"---\n⚠ LH 일부 조회 실패: {'; '.join(lh_warnings)}")
+
     return "\n".join(lines)
 
 
@@ -405,7 +427,7 @@ async def get_upcoming_deadlines(
         days: 마감까지 남은 일수 (기본값 7일 이내)
     """
     try:
-        notices = await _gather_all_lh_notices(0, LH_TP_CODES)
+        notices, warnings = await _gather_all_lh_notices(0, LH_TP_CODES)
     except Exception as e:
         return f"오류: {e}"
 
@@ -425,7 +447,10 @@ async def get_upcoming_deadlines(
             upcoming.append(n)
 
     if not upcoming:
-        return f"마감 {days}일 이내 LH 공고가 없습니다."
+        msg = f"마감 {days}일 이내 LH 공고가 없습니다."
+        if warnings:
+            msg += f"\n\n⚠ LH 일부 조회 실패: {'; '.join(warnings)}"
+        return msg
 
     upcoming.sort(key=lambda x: x["_d_day"])
 
@@ -437,6 +462,10 @@ async def get_upcoming_deadlines(
         lines.append("")
 
     lines.append("*IH 공고는 마감일 정보가 없어 포함되지 않습니다.*")
+
+    if warnings:
+        lines.append(f"\n---\n⚠ LH 일부 조회 실패: {'; '.join(warnings)}")
+
     return "\n".join(lines)
 
 

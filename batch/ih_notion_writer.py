@@ -23,12 +23,10 @@ DB_NAME = "IH 인천도시공사 분양임대 공고"
 DB_PROPERTIES = {
     "공고구분": {"select": {}},
     "유형":     {"select": {}},
-    "등록일":   {"rich_text": {}},
+    "등록일":   {"date": {}},
     "링크":     {"url": {}},
     "상태":     {"select": {}},
     "수집일시": {"date": {}},
-    "접수마감일": {"date": {}},
-    "알림완료":  {"checkbox": {}},
     "첨부파일":  {"files": {}},
 }
 
@@ -37,16 +35,16 @@ DB_PROPERTIES = {
 # IH 고유 로직
 # ---------------------------------------------------------------------------
 def _build_properties(notice: dict, collected_at: str) -> dict:
+    crt_ymd = notice.get("crtYmd", "")
+    reg_date = {"date": {"start": crt_ymd}} if crt_ymd else {"date": None}
     return {
         "공고명":   {"title": rich_text(notice.get("sj", ""))},
         "공고구분": select(notice.get("seNm", "")),
         "유형":     select(notice.get("tyNm", "")),
-        "등록일":   {"rich_text": rich_text(notice.get("crtYmd", ""))},
+        "등록일":   reg_date,
         "링크":     {"url": notice.get("link") or None},
         "상태":     select("모집중"),
         "수집일시": {"date": {"start": collected_at}},
-        "접수마감일": {"date": None},
-        "알림완료": {"checkbox": False},
         "첨부파일": {"files": [
             {"type": "external", "name": f.get("name", "file"),
              "external": {"url": f["url"]}}
@@ -59,10 +57,10 @@ def _build_properties(notice: dict, collected_at: str) -> dict:
 # ---------------------------------------------------------------------------
 # 페이지 캐시 빌드
 # ---------------------------------------------------------------------------
-def _get_all_link_page_map(db_id: str) -> dict[str, dict]:
+async def _get_all_link_page_map(db_id: str) -> dict[str, dict]:
     """Notion DB의 모든 페이지를 {link: {"id": page_id, "status": str}} 형태로 반환."""
     pages = {}
-    for page in paginate_query(db_id):
+    for page in await paginate_query(db_id):
         props = page.get("properties", {})
         link = normalize_link(props.get("링크", {}).get("url", "") or "")
         if link:
@@ -75,7 +73,7 @@ def _get_all_link_page_map(db_id: str) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 # 만료 처리
 # ---------------------------------------------------------------------------
-def close_expired_notices(
+async def close_expired_notices(
     active_links: set[str], page_cache: dict[str, dict],
 ) -> int:
     """DB의 '모집중' 공고 중 active_links에 없는 것을 '마감' 처리.
@@ -97,7 +95,7 @@ def close_expired_notices(
 
     for link, info in page_cache.items():
         if link not in active_links and info["status"] != "마감":
-            notion.pages.update(
+            await notion.pages.update(
                 page_id=info["id"],
                 properties={"상태": select("마감")},
             )
@@ -111,7 +109,7 @@ def close_expired_notices(
 # ---------------------------------------------------------------------------
 # Upsert
 # ---------------------------------------------------------------------------
-def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None = None):
+async def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None = None):
     """공고 1건을 Notion DB에 upsert합니다."""
     notion = get_notion_client()
     collected_at = datetime.now(tz=timezone.utc).isoformat()
@@ -125,7 +123,7 @@ def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None =
         existing_page_id = info["id"] if info else None
     else:
         if link:
-            result = query_db(db_id, {
+            result = await query_db(db_id, {
                 "filter": {"property": "링크", "url": {"equals": link}}
             })
             results = result.get("results", [])
@@ -134,11 +132,11 @@ def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None =
             existing_page_id = None
 
     if existing_page_id:
-        notion.pages.update(page_id=existing_page_id, properties=properties)
+        await notion.pages.update(page_id=existing_page_id, properties=properties)
         logger.info(f"  [업데이트] {title}")
         return False
     else:
-        notion.pages.create(
+        await notion.pages.create(
             parent={"type": "database_id", "database_id": db_id},
             properties=properties,
         )
@@ -146,16 +144,16 @@ def upsert_notice(db_id: str, notice: dict, page_cache: dict[str, dict] | None =
         return True
 
 
-def upsert_all(notices: list[dict]) -> dict:
+async def upsert_all(notices: list[dict]) -> dict:
     """공고 목록 전체를 Notion DB에 upsert합니다.
 
     Returns:
         dict: {"new": int, "updated": int, "closed": int, "failed": int, "new_notices": list}
     """
-    db_id = get_or_create_database("IH_NOTION_DATABASE_ID", DB_NAME, DB_PROPERTIES)
+    db_id = await get_or_create_database("IH_NOTION_DATABASE_ID", DB_NAME, DB_PROPERTIES)
 
     logger.info("IH Notion DB 전체 조회 중...")
-    page_cache = _get_all_link_page_map(db_id)
+    page_cache = await _get_all_link_page_map(db_id)
     logger.info(f"기존 등록 공고 수: {len(page_cache)}건")
 
     new, updated, failed = 0, 0, 0
@@ -164,7 +162,7 @@ def upsert_all(notices: list[dict]) -> dict:
 
     for notice in notices:
         try:
-            is_new = upsert_notice(db_id, notice, page_cache=page_cache)
+            is_new = await upsert_notice(db_id, notice, page_cache=page_cache)
             if is_new:
                 new += 1
                 new_notices.append(notice)
@@ -180,7 +178,7 @@ def upsert_all(notices: list[dict]) -> dict:
             })
 
     active_links = {n.get("link") for n in notices if n.get("link")}
-    closed = close_expired_notices(active_links, page_cache)
+    closed = await close_expired_notices(active_links, page_cache)
 
     logger.info(f"IH Notion 저장 완료 - 신규: {new}, 업데이트: {updated}, 마감: {closed}, 실패: {failed}")
     return {

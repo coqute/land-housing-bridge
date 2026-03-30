@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
+import httpx
 
 from config import validate_env, LH_TP_CODES, TARGET_REGION, NATIONWIDE_AIS_CODES
 from lh_api import fetch_lh_notices, dedup_by_pan_id, filter_region_relevant
@@ -11,7 +12,6 @@ from .notion_writer import upsert_all as lh_upsert_all
 from ih_api import fetch_all_ih_notices
 from .ih_notion_writer import upsert_all as ih_upsert_all
 from .report_writer import write_report
-from .notify_upcoming import send_deadline_notifications
 from doc_processor import scrape_lh_detail, scrape_ih_detail, create_scrape_client
 
 # ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 IH_LOOKBACK_DAYS = 90
 
 _NOISE_KEYWORDS = ("마감", "취소", "결과", "계약", "입주안내", "변경", "정정")
-_SCRAPE_DELAY = 1.0  # 정부 사이트 rate limit 예의
+_SCRAPE_DELAY = 0.3  # 정부 사이트 rate limit (Semaphore(3) × 0.3초 ≈ 3.3 req/s)
 _SCRAPE_CONCURRENCY = 3  # 스크래핑 동시 요청 수 (LH/IH 각각)
 
 
@@ -93,11 +93,12 @@ async def run_lh_batch():
     logger.info("LH 배치 시작")
 
     try:
-        # 인천 지역(CNP_CD=28) + 전국(CNP_CD 없음) 이중 조회
-        regional = [fetch_lh_notices(tp_code=tp, status="", cnp_code="28") for tp in LH_TP_CODES]
-        national = [fetch_lh_notices(tp_code=tp, status="", cnp_code="") for tp in LH_TP_CODES]
+        # 인천 지역(CNP_CD=28) + 전국(CNP_CD 없음) 이중 조회 (공유 클라이언트)
+        async with httpx.AsyncClient(timeout=30.0) as api_client:
+            regional = [fetch_lh_notices(tp_code=tp, status="", cnp_code="28", client=api_client) for tp in LH_TP_CODES]
+            national = [fetch_lh_notices(tp_code=tp, status="", cnp_code="", client=api_client) for tp in LH_TP_CODES]
 
-        all_results = await asyncio.gather(*(regional + national), return_exceptions=True)
+            all_results = await asyncio.gather(*(regional + national), return_exceptions=True)
 
         regional_valid = []
         national_valid = []
@@ -142,7 +143,7 @@ async def run_lh_batch():
     await _scrape_pdf_urls(notices, "lh")
 
     try:
-        result = lh_upsert_all(notices)
+        result = await lh_upsert_all(notices)
     except Exception as e:
         logger.error(f"LH Notion 저장 중 오류: {e}")
         return False, None
@@ -183,7 +184,7 @@ async def run_ih_batch():
     await _scrape_pdf_urls(notices, "ih")
 
     try:
-        result = ih_upsert_all(notices)
+        result = await ih_upsert_all(notices)
     except Exception as e:
         logger.error(f"IH Notion 저장 중 오류: {e}")
         return False, None
@@ -208,21 +209,10 @@ async def main():
         lh_ok, lh_result = False, None
         ih_ok, ih_result = False, None
 
-    # 알림 단계 (LH만 — IH는 마감일 없음)
-    lh_notified = 0
-    if lh_ok:
-        try:
-            lh_db_id = os.getenv("NOTION_DATABASE_ID", "").strip()
-            if lh_db_id:
-                lh_notified = send_deadline_notifications(lh_db_id, "LH")
-        except Exception as e:
-            logger.error(f"LH 마감 알림 처리 실패: {e}")
-
     elapsed = time.time() - start_time
 
     try:
-        write_report(lh_result, ih_result, elapsed, lh_ok, ih_ok,
-                      lh_notified=lh_notified)
+        await write_report(lh_result, ih_result, elapsed, lh_ok, ih_ok)
     except Exception as e:
         logger.error(f"배치 리포트 생성 실패: {e}")
 

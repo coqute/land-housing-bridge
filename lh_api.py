@@ -110,6 +110,7 @@ async def fetch_lh_notices(
     status: str = '공고중',
     lookback_days: int = 0,
     keyword: str = '',
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict]:
     """LH 임대공고 목록을 조회하고, 공고별 공급유형 상세 정보를 함께 반환합니다.
 
@@ -149,8 +150,8 @@ async def fetch_lh_notices(
         notice_params["PAN_ST_DT"] = (today - timedelta(days=lookback_days)).strftime('%Y.%m.%d')
         notice_params["PAN_ED_DT"] = today.strftime('%Y.%m.%d')
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        notice_resp = await request_with_retry(client, "GET", NOTICE_URL, params=notice_params)
+    async def _do_fetch(c: httpx.AsyncClient):
+        notice_resp = await request_with_retry(c, "GET", NOTICE_URL, params=notice_params)
         notice_data = notice_resp.json()
 
         raw_list = _extract_ds_list(notice_data)
@@ -163,30 +164,41 @@ async def fetch_lh_notices(
         if not raw_list:
             return []
 
-        supply_tasks = [_fetch_supply(client, item, tp_code) for item in raw_list]
+        supply_tasks = [_fetch_supply(c, item, tp_code) for item in raw_list]
         supply_results = await asyncio.gather(*supply_tasks)
+        return raw_list, supply_results
 
-        results = []
-        for item, (supply_columns, supply_details, supply_error) in zip(raw_list, supply_results):
-            results.append({
-                "PAN_ID": item.get('PAN_ID', ''),
-                "PAN_NM": item.get('PAN_NM', ''),
-                "AIS_TP_CD": item.get('AIS_TP_CD', ''),
-                "AIS_TP_CD_NM": item.get('AIS_TP_CD_NM', ''),
-                "CNP_CD_NM": item.get('CNP_CD_NM', ''),
-                "PAN_SS": item.get('PAN_SS', ''),
-                "PAN_NT_ST_DT": item.get('PAN_NT_ST_DT', ''),   # 공고 시작일 (응답 필드명)
-                "CLSG_DT": item.get('CLSG_DT', ''),             # 공고 마감일 (응답 필드명)
-                "PAN_DT": item.get('PAN_DT', ''),               # 공고일자
-                "DTL_URL": item.get('DTL_URL', ''),
-                "SPL_INF_TP_CD": item.get('SPL_INF_TP_CD', ''),
-                "CCR_CNNT_SYS_DS_CD": item.get('CCR_CNNT_SYS_DS_CD', ''),
-                "supply_columns": supply_columns,
-                "supply_details": supply_details,
-                "supply_error": supply_error,
-            })
+    if client:
+        result = await _do_fetch(client)
+    else:
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            result = await _do_fetch(c)
 
-        return results
+    if not result:
+        return []
+    raw_list, supply_results = result
+
+    results = []
+    for item, (supply_columns, supply_details, supply_error) in zip(raw_list, supply_results):
+        results.append({
+            "PAN_ID": item.get('PAN_ID', ''),
+            "PAN_NM": item.get('PAN_NM', ''),
+            "AIS_TP_CD": item.get('AIS_TP_CD', ''),
+            "AIS_TP_CD_NM": item.get('AIS_TP_CD_NM', ''),
+            "CNP_CD_NM": item.get('CNP_CD_NM', ''),
+            "PAN_SS": item.get('PAN_SS', ''),
+            "PAN_NT_ST_DT": item.get('PAN_NT_ST_DT', ''),
+            "CLSG_DT": item.get('CLSG_DT', ''),
+            "PAN_DT": item.get('PAN_DT', ''),
+            "DTL_URL": item.get('DTL_URL', ''),
+            "SPL_INF_TP_CD": item.get('SPL_INF_TP_CD', ''),
+            "CCR_CNNT_SYS_DS_CD": item.get('CCR_CNNT_SYS_DS_CD', ''),
+            "supply_columns": supply_columns,
+            "supply_details": supply_details,
+            "supply_error": supply_error,
+        })
+
+    return results
 
 
 async def fetch_supply_detail(

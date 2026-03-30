@@ -17,8 +17,8 @@ DB_PROPERTIES = {
     "IH업데이트":   {"number": {}},
     "IH마감":       {"number": {}},
     "LH실패":       {"number": {}},
+    "LH공급실패":   {"number": {}},
     "IH실패":       {"number": {}},
-    "LH알림":       {"number": {}},
     "상태":         {"select": {}},
 }
 
@@ -81,16 +81,15 @@ def _build_detail_blocks(lh_result: dict | None, ih_result: dict | None) -> list
     return blocks
 
 
-def write_report(
+async def write_report(
     lh_result: dict | None,
     ih_result: dict | None,
     elapsed_seconds: float,
     lh_ok: bool,
     ih_ok: bool,
-    lh_notified: int = 0,
 ):
     """배치 실행 리포트 1건을 Notion DB에 생성합니다."""
-    db_id = get_or_create_database(
+    db_id = await get_or_create_database(
         "REPORT_DATABASE_ID", DB_NAME, DB_PROPERTIES, title_name="리포트명",
     )
 
@@ -113,15 +112,15 @@ def write_report(
         "IH업데이트": {"number": ih.get("updated", 0)},
         "IH마감":     {"number": ih.get("closed", 0)},
         "LH실패":     {"number": lh.get("failed", 0)},
+        "LH공급실패": {"number": lh.get("supply_errors", 0)},
         "IH실패":     {"number": ih.get("failed", 0)},
-        "LH알림":     {"number": lh_notified},
         "상태":       select(status),
     }
 
     detail_blocks = _build_detail_blocks(lh_result, ih_result)
 
     notion = get_notion_client()
-    page = notion.pages.create(
+    page = await notion.pages.create(
         parent={"type": "database_id", "database_id": db_id},
         properties=properties,
         children=detail_blocks,
@@ -137,7 +136,7 @@ def write_report(
             failed_parts.append(f"IH 실패 ({ih.get('failed', 0)}건)")
         comment_text = f"[배치 {status}] {', '.join(failed_parts) or status}"
         try:
-            notion.comments.create(
+            await notion.comments.create(
                 parent={"page_id": page["id"]},
                 rich_text=[{"type": "text", "text": {"content": comment_text}}],
             )
